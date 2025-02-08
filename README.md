@@ -7,4 +7,5 @@ The original wireless.lua file should be replaced
 
 The program was tested on a PocketBook InkPad 4 device.
 
-The code was mostly written by Claude AI. A huge thanks to Vladimir Streltsov, who explained to me and Claude what bind and bind1 are.
+The code was mostly written by Claude AI. A huge thanks to [Volodymyr Streltsov](https://github.com/VolodymyrStreltsov), who explained to me and Claude what bind and bind1 are.
+
