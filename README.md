@@ -4,3 +4,7 @@ Module for the plugin calibre.koplugin to the KOreader application. The program 
 ## Installation:
 Add files pb-dp.lua and wireless.lua to the folder /applications/koreader/plugins/calibre.koplugin.
 The original wireless.lua file should be replaced
+
+The program was tested on a PocketBook InkPad 4 device.
+
+The code was mostly written by Claude AI. A huge thanks to Vladimir Streltsov, who explained to me and Claude what bind and bind1 are.
