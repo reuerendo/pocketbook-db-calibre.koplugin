@@ -22,7 +22,7 @@ local sha = require("ffi/sha2")
 local util = require("util")
 local _ = require("gettext")
 local T = FFIUtil.template
-local PocketbookDBHandler = require("pb-db")
+local PocketBookDBHandler = require("pb-db")
 
 require("ffi/zeromq_h")
 
