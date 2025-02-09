@@ -9,7 +9,7 @@ The original wireless.lua file should be replaced.
 The plugin adds books to collections on the device. In order to use this feature the collections column lookup name in Calibre should be "#collections".
 
 
-The program was tested on a PocketBook InkPad 4 device.
+*The program was tested on a PocketBook InkPad 4 and Touch Lux 5 devices.*
 
-The code was mostly written by Claude AI. A huge thanks to [Volodymyr Streltsov](https://github.com/VolodymyrStreltsov), who explained to me and Claude what bind and bind1 are.
+*The code was mostly written by Claude AI. A huge thanks to [Volodymyr Streltsov](https://github.com/VolodymyrStreltsov), who explained to me and Claude what bind and bind1 are.*
 
