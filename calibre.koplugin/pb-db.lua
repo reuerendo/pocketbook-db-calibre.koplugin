@@ -9,6 +9,14 @@ local current_timestamp = os.time()
 
 local PocketBookDBHandler = {}
 
+local function get_storage_id(filename)
+    if string.match(filename, "^/mnt/ext1") then
+        return 1
+    else
+        return 2
+    end
+end
+
 function PocketBookDBHandler:saveBookToDatabase(arg, filename)
     local db_path = "/mnt/ext1/system/explorer-3/explorer-3.db"
     
@@ -56,10 +64,12 @@ function PocketBookDBHandler:saveBookToDatabase(arg, filename)
     db:exec("BEGIN TRANSACTION")
     logger.info("Транзакция начата")
     
+	logger.info("FILENAME:", filename)
     local success = true
     local folder_id, book_id
     local folder = filename:match("(.+)/[^/]+$")
-    local storage_id = 1
+    local storage_id = get_storage_id(filename)
+		logger.info("stotage_id:", storage_id)
     local file_name = filename:match("/([^/]+)$")
     local file_ext = file_name:match("%.([^%.]+)$")
 
