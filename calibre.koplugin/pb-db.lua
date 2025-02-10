@@ -17,7 +17,7 @@ local function get_storage_id(filename)
     end
 end
 
-function PocketBookDBHandler:saveBookToDatabase(arg, filename)
+function PocketBookDBHandler:saveBookToDatabase(arg, filename, collections_lookup_name)
     local db_path = "/mnt/ext1/system/explorer-3/explorer-3.db"
     
     local function getFirstLetter(str)
@@ -308,9 +308,9 @@ function PocketBookDBHandler:saveBookToDatabase(arg, filename)
         success = false
     end
     files_stmt:close()
-
-    if success and arg.metadata.user_metadata["#collections"] and arg.metadata.user_metadata["#collections"]["#value#"] then
-        local collections = arg.metadata.user_metadata["#collections"]["#value#"]
+	
+	if success and arg.metadata.user_metadata[collections_lookup_name] and arg.metadata.user_metadata[collections_lookup_name]["#value#"] then
+		local collections = arg.metadata.user_metadata[collections_lookup_name]["#value#"]
         
         for _, collection_name in ipairs(collections) do
             local select_bookshelf_sql = [[
@@ -318,45 +318,67 @@ function PocketBookDBHandler:saveBookToDatabase(arg, filename)
                 WHERE name = ?;
             ]]
             
-            local select_bookshelf_stmt = db:prepare(select_bookshelf_sql)
-            if not select_bookshelf_stmt then
-                logger.info("Ошибка: не удалось подготовить SQL-запрос для проверки полки!")
-                success = false
-                break
-            end
-            
-            select_bookshelf_stmt:bind1(1, collection_name)
-            local bookshelf_row = select_bookshelf_stmt:step()
-            select_bookshelf_stmt:close()
-            
-            local bookshelf_id
-            if type(bookshelf_row) == "table" then
-                bookshelf_id = bookshelf_row[1]
-            else
-                local insert_bookshelf_sql = [[
-                    INSERT INTO bookshelfs (name, is_deleted, ts, uuid)
-                    VALUES (?, 0, ?, NULL);
-                ]]
-                
-                local insert_bookshelf_stmt = db:prepare(insert_bookshelf_sql)
-                if not insert_bookshelf_stmt then
-                    logger.info("Ошибка: не удалось подготовить SQL-запрос для создания полки!")
-                    success = false
-                    break
-                end
-                
-                insert_bookshelf_stmt:bind1(1, collection_name)
-                insert_bookshelf_stmt:bind1(2, current_timestamp)
-                
-                if insert_bookshelf_stmt:step() ~= SQ3.DONE then
-                    logger.info("Ошибка при создании полки")
-                    success = false
-                    break
-                end
-                
-                bookshelf_id = db:rowexec("SELECT last_insert_rowid()")
-                insert_bookshelf_stmt:close()
-            end
+			local select_bookshelf_stmt = db:prepare(select_bookshelf_sql)
+			if not select_bookshelf_stmt then
+				logger.info("Ошибка: не удалось подготовить SQL-запрос для проверки полки!")
+				success = false
+				break
+			end
+
+			select_bookshelf_stmt:bind1(1, collection_name)
+			local bookshelf_row = select_bookshelf_stmt:step()
+			select_bookshelf_stmt:close()
+
+			local bookshelf_id
+			if type(bookshelf_row) == "table" then
+				bookshelf_id = bookshelf_row[1]
+				
+				-- Добавляем UPDATE запрос для обновления is_deleted
+				local update_sql = [[
+					UPDATE bookshelfs 
+					SET is_deleted = 0 
+					WHERE rowid = ?;
+				]]
+				
+				local update_stmt = db:prepare(update_sql)
+				if not update_stmt then
+					logger.info("Ошибка: не удалось подготовить SQL-запрос для обновления is_deleted!")
+					success = false
+					break
+				end
+				
+				update_stmt:bind1(1, bookshelf_id)
+				if update_stmt:step() ~= SQ3.DONE then
+					logger.info("Ошибка при обновлении is_deleted")
+					success = false
+					break
+				end
+				update_stmt:close()
+			else
+				local insert_bookshelf_sql = [[
+					INSERT INTO bookshelfs (name, is_deleted, ts, uuid)
+					VALUES (?, 0, ?, NULL);
+				]]
+				
+				local insert_bookshelf_stmt = db:prepare(insert_bookshelf_sql)
+				if not insert_bookshelf_stmt then
+					logger.info("Ошибка: не удалось подготовить SQL-запрос для создания полки!")
+					success = false
+					break
+				end
+				
+				insert_bookshelf_stmt:bind1(1, collection_name)
+				insert_bookshelf_stmt:bind1(2, current_timestamp)
+				
+				if insert_bookshelf_stmt:step() ~= SQ3.DONE then
+					logger.info("Ошибка при создании полки")
+					success = false
+					break
+				end
+				
+				bookshelf_id = db:rowexec("SELECT last_insert_rowid()")
+				insert_bookshelf_stmt:close()
+			end
             
             if bookshelf_id then
                 local insert_bookshelf_book_sql = [[
