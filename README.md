@@ -3,10 +3,10 @@ Module for the plugin calibre.koplugin to the KOreader application. The program 
 
 ## Installation:
 Add files pb-dp.lua and wireless.lua to the folder /applications/koreader/plugins/calibre.koplugin.
-The original wireless.lua file should be replaced.
+The original wireless.lua and main.lua files should be replaced.
 
 ## Collections
-The plugin adds books to collections on the device. In order to use this feature the collections column lookup name in Calibre should be "#collections".
+The plugin adds books to collections on the device. To use this function, you should specify the column lookup name in the calibre (in the #name format) in the plugin settings.
 
 
 *The program was tested on a PocketBook InkPad 4 and Touch Lux 5 devices.*
