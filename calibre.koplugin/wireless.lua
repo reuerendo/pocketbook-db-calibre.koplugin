@@ -378,6 +378,7 @@ function CalibreWireless:getInitInfo(arg)
     end
     self.calibre.version = arg.calibre_version
     self.calibre.version_string = s
+	
     local getPasswordHash = function()
         local password = G_reader_settings:readSetting("calibre_wireless_password")
         local challenge = arg.passwordChallenge
@@ -448,6 +449,50 @@ function CalibreWireless:setPassword()
     }
     UIManager:show(password_dialog)
     password_dialog:onShowKeyboard()
+end
+
+function CalibreWireless:setCollectionsLookupName()
+    local function lookupNameCheck(name)
+        -- Проверяем, начинается ли строка с символа '#'
+        if type(name) == "string" and name:sub(1, 1) == "#" then
+            return true
+        end
+        return false
+    end
+
+    local lookup_name_dialog
+    lookup_name_dialog = InputDialog:new{
+        title = _("Set Collections Lookup Name"),
+        input = G_reader_settings:readSetting("collections") or "",
+        buttons = {{
+            {
+                text = _("Cancel"),
+                id = "close",
+                callback = function()
+                    UIManager:close(lookup_name_dialog)
+                end,
+            },
+            {
+                text = _("Set Name"),
+                callback = function()
+                    local name = lookup_name_dialog:getInputText()
+                    if lookupNameCheck(name) then
+                        -- Сохраняем значение в переменную, например, глобальную
+                        collections = name
+                        -- Также можно сохранить в настройках
+                        G_reader_settings:saveSetting("collections", name)
+                    else
+                        -- Если строка не начинается с '#', удаляем значение
+                        collections = nil
+                        G_reader_settings:delSetting("collections")
+                    end
+                    UIManager:close(lookup_name_dialog)
+                end,
+            },
+        }},
+    }
+    UIManager:show(lookup_name_dialog)
+    lookup_name_dialog:onShowKeyboard()
 end
 
 function CalibreWireless:getDeviceInfo(arg)
@@ -532,6 +577,8 @@ end
 function CalibreWireless:sendBook(arg)
     logger.dbg("SEND_BOOK", arg)
     local inbox_dir = G_reader_settings:readSetting("inbox_dir")
+	local collections_lookup_name = G_reader_settings:readSetting("collections")
+	logger.info("Collections", collections_lookup_name)
     local filename = inbox_dir .. "/" .. arg.lpath
     local fits = getFreeSpace(inbox_dir) >= (arg.length + 128 * 1024)
     local to_write_bytes = arg.length
@@ -584,7 +631,7 @@ function CalibreWireless:sendBook(arg)
                 updateDir(inbox_dir)
 				
 				if Device:isPocketBook() then
-					PocketBookDBHandler:saveBookToDatabase(arg, filename)
+					PocketBookDBHandler:saveBookToDatabase(arg, filename, collections_lookup_name)
 				end
 				
             end
