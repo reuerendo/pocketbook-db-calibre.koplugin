@@ -294,6 +294,20 @@ function Calibre:getWirelessMenuTable()
             end,
         },
         {
+            text = _("Set read lookup name"),
+            enabled_func = isEnabled,
+            callback = function()
+                CalibreWireless:setReadLookupName()
+            end,
+        },
+        {
+            text = _("Set favorite lookup name"),
+            enabled_func = isEnabled,
+            callback = function()
+                CalibreWireless:setFavoriteLookupName()
+            end,
+        },
+        {
             text_func = function()
                 local address = _("automatic")
                 if G_reader_settings:has("calibre_wireless_url") then
