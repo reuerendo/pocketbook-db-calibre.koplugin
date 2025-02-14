@@ -495,6 +495,94 @@ function CalibreWireless:setCollectionsLookupName()
     lookup_name_dialog:onShowKeyboard()
 end
 
+function CalibreWireless:setReadLookupName()
+    local function lookupNameCheck(name)
+        -- Проверяем, начинается ли строка с символа '#'
+        if type(name) == "string" and name:sub(1, 1) == "#" then
+            return true
+        end
+        return false
+    end
+
+    local lookup_name_dialog
+    lookup_name_dialog = InputDialog:new{
+        title = _("Set Read Lookup Name"),
+        input = G_reader_settings:readSetting("read_name") or "",
+        buttons = {{
+            {
+                text = _("Cancel"),
+                id = "close",
+                callback = function()
+                    UIManager:close(lookup_name_dialog)
+                end,
+            },
+            {
+                text = _("Set Name"),
+                callback = function()
+                    local name = lookup_name_dialog:getInputText()
+                    if lookupNameCheck(name) then
+                        -- Сохраняем значение в переменную, например, глобальную
+                        read_name = name
+                        -- Также можно сохранить в настройках
+                        G_reader_settings:saveSetting("read_name", name)
+                    else
+                        -- Если строка не начинается с '#', удаляем значение
+                        collections = nil
+                        G_reader_settings:delSetting("read_name")
+                    end
+                    UIManager:close(lookup_name_dialog)
+                end,
+            },
+        }},
+    }
+    UIManager:show(lookup_name_dialog)
+    lookup_name_dialog:onShowKeyboard()
+end
+
+function CalibreWireless:setFavoriteLookupName()
+    local function lookupNameCheck(name)
+        -- Проверяем, начинается ли строка с символа '#'
+        if type(name) == "string" and name:sub(1, 1) == "#" then
+            return true
+        end
+        return false
+    end
+
+    local lookup_name_dialog
+    lookup_name_dialog = InputDialog:new{
+        title = _("Set Favorite Lookup Name"),
+        input = G_reader_settings:readSetting("favorite_name") or "",
+        buttons = {{
+            {
+                text = _("Cancel"),
+                id = "close",
+                callback = function()
+                    UIManager:close(lookup_name_dialog)
+                end,
+            },
+            {
+                text = _("Set Name"),
+                callback = function()
+                    local name = lookup_name_dialog:getInputText()
+                    if lookupNameCheck(name) then
+                        -- Сохраняем значение в переменную, например, глобальную
+                        favorite_name = name
+                        -- Также можно сохранить в настройках
+                        G_reader_settings:saveSetting("favorite_name", name)
+                    else
+                        -- Если строка не начинается с '#', удаляем значение
+                        collections = nil
+                        G_reader_settings:delSetting("favorite_name")
+                    end
+                    UIManager:close(lookup_name_dialog)
+                end,
+            },
+        }},
+    }
+    UIManager:show(lookup_name_dialog)
+    lookup_name_dialog:onShowKeyboard()
+end
+
 function CalibreWireless:getDeviceInfo(arg)
     logger.dbg("GET_DEVICE_INFORMATION", arg)
     local device_info = {
