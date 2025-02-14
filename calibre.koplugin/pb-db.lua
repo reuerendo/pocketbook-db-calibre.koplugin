@@ -17,8 +17,11 @@ local function get_storage_id(filename)
     end
 end
 
-function PocketBookDBHandler:saveBookToDatabase(arg, filename, collections_lookup_name)
+function PocketBookDBHandler:saveBookToDatabase(arg, filename)
     local db_path = "/mnt/ext1/system/explorer-3/explorer-3.db"
+	collections_lookup_name = G_reader_settings:readSetting("collections_name")
+	read_lookup_name = G_reader_settings:readSetting("read_name")
+	favorite_lookup_name = G_reader_settings:readSetting("favorite_name")
     
     local function getFirstLetter(str)
         if not str or str == "" then return "" end
@@ -311,102 +314,180 @@ function PocketBookDBHandler:saveBookToDatabase(arg, filename, collections_looku
 	
 	if success and arg.metadata.user_metadata[collections_lookup_name] and arg.metadata.user_metadata[collections_lookup_name]["#value#"] then
 		local collections = arg.metadata.user_metadata[collections_lookup_name]["#value#"]
+			
+			for _, collection_name in ipairs(collections) do
+				local select_bookshelf_sql = [[
+					SELECT id FROM bookshelfs 
+					WHERE name = ?;
+				]]
+				
+				local select_bookshelf_stmt = db:prepare(select_bookshelf_sql)
+				if not select_bookshelf_stmt then
+					logger.info("Ошибка: не удалось подготовить SQL-запрос для проверки полки!")
+					success = false
+					break
+				end
+
+				select_bookshelf_stmt:bind1(1, collection_name)
+				local bookshelf_row = select_bookshelf_stmt:step()
+				select_bookshelf_stmt:close()
+
+				local bookshelf_id
+				if type(bookshelf_row) == "table" then
+					bookshelf_id = bookshelf_row[1]
+					
+					-- Добавляем UPDATE запрос для обновления is_deleted
+					local update_sql = [[
+						UPDATE bookshelfs 
+						SET is_deleted = 0 
+						WHERE rowid = ?;
+					]]
+					
+					local update_stmt = db:prepare(update_sql)
+					if not update_stmt then
+						logger.info("Ошибка: не удалось подготовить SQL-запрос для обновления is_deleted!")
+						success = false
+						break
+					end
+					
+					update_stmt:bind1(1, bookshelf_id)
+					if update_stmt:step() ~= SQ3.DONE then
+						logger.info("Ошибка при обновлении is_deleted")
+						success = false
+						break
+					end
+					update_stmt:close()
+				else
+					local insert_bookshelf_sql = [[
+						INSERT INTO bookshelfs (name, is_deleted, ts, uuid)
+						VALUES (?, 0, ?, NULL);
+					]]
+					
+					local insert_bookshelf_stmt = db:prepare(insert_bookshelf_sql)
+					if not insert_bookshelf_stmt then
+						logger.info("Ошибка: не удалось подготовить SQL-запрос для создания полки!")
+						success = false
+						break
+					end
+					
+					insert_bookshelf_stmt:bind1(1, collection_name)
+					insert_bookshelf_stmt:bind1(2, current_timestamp)
+					
+					if insert_bookshelf_stmt:step() ~= SQ3.DONE then
+						logger.info("Ошибка при создании полки")
+						success = false
+						break
+					end
+					
+					bookshelf_id = db:rowexec("SELECT last_insert_rowid()")
+					insert_bookshelf_stmt:close()
+				end
+				
+				if bookshelf_id then
+					local insert_bookshelf_book_sql = [[
+						INSERT INTO bookshelfs_books (bookshelfid, bookid, ts, is_deleted)
+						VALUES (?, ?, ?, 0);
+					]]
+					
+					local insert_bookshelf_book_stmt = db:prepare(insert_bookshelf_book_sql)
+					if not insert_bookshelf_book_stmt then
+						logger.info("Ошибка: не удалось подготовить SQL-запрос для связи книги с полкой!")
+						success = false
+						break
+					end
+					
+					insert_bookshelf_book_stmt:bind1(1, bookshelf_id)
+					insert_bookshelf_book_stmt:bind1(2, book_id)
+					insert_bookshelf_book_stmt:bind1(3, current_timestamp)
+					
+					if insert_bookshelf_book_stmt:step() ~= SQ3.DONE then
+						logger.info("Ошибка при создании связи книги с полкой")
+						success = false
+						break
+					end
+					insert_bookshelf_book_stmt:close()
+				end
+			end
+		end
+	end
+
+    if success then
+        -- Проверяем наличие меток в метаданных
+		local has_read = arg.metadata.user_metadata 
+			and arg.metadata.user_metadata[read_lookup_name] 
+			and arg.metadata.user_metadata[read_lookup_name]["#value#"] == true
+
+		local has_favorite = arg.metadata.user_metadata 
+			and arg.metadata.user_metadata[favorite_lookup_name] 
+			and arg.metadata.user_metadata[favorite_lookup_name]["#value#"] == true
         
-        for _, collection_name in ipairs(collections) do
-            local select_bookshelf_sql = [[
-                SELECT id FROM bookshelfs 
-                WHERE name = ?;
+        if has_read or has_favorite then
+			local completed = has_read and 1 or 0
+			local favorite = has_favorite and 1 or 0
+            
+            local select_settings_sql = [[
+                SELECT bookid FROM books_settings 
+                WHERE bookid = ? AND profileid = 1;
             ]]
             
-			local select_bookshelf_stmt = db:prepare(select_bookshelf_sql)
-			if not select_bookshelf_stmt then
-				logger.info("Ошибка: не удалось подготовить SQL-запрос для проверки полки!")
-				success = false
-				break
-			end
+            local select_settings_stmt = db:prepare(select_settings_sql)
+            if not select_settings_stmt then
+                logger.info("Ошибка: не удалось подготовить SQL-запрос для проверки настроек!")
+                success = false
+            else
+                select_settings_stmt:bind1(1, book_id)
+                local settings_row = select_settings_stmt:step()
+                select_settings_stmt:close()
 
-			select_bookshelf_stmt:bind1(1, collection_name)
-			local bookshelf_row = select_bookshelf_stmt:step()
-			select_bookshelf_stmt:close()
-
-			local bookshelf_id
-			if type(bookshelf_row) == "table" then
-				bookshelf_id = bookshelf_row[1]
-				
-				-- Добавляем UPDATE запрос для обновления is_deleted
-				local update_sql = [[
-					UPDATE bookshelfs 
-					SET is_deleted = 0 
-					WHERE rowid = ?;
-				]]
-				
-				local update_stmt = db:prepare(update_sql)
-				if not update_stmt then
-					logger.info("Ошибка: не удалось подготовить SQL-запрос для обновления is_deleted!")
-					success = false
-					break
-				end
-				
-				update_stmt:bind1(1, bookshelf_id)
-				if update_stmt:step() ~= SQ3.DONE then
-					logger.info("Ошибка при обновлении is_deleted")
-					success = false
-					break
-				end
-				update_stmt:close()
-			else
-				local insert_bookshelf_sql = [[
-					INSERT INTO bookshelfs (name, is_deleted, ts, uuid)
-					VALUES (?, 0, ?, NULL);
-				]]
-				
-				local insert_bookshelf_stmt = db:prepare(insert_bookshelf_sql)
-				if not insert_bookshelf_stmt then
-					logger.info("Ошибка: не удалось подготовить SQL-запрос для создания полки!")
-					success = false
-					break
-				end
-				
-				insert_bookshelf_stmt:bind1(1, collection_name)
-				insert_bookshelf_stmt:bind1(2, current_timestamp)
-				
-				if insert_bookshelf_stmt:step() ~= SQ3.DONE then
-					logger.info("Ошибка при создании полки")
-					success = false
-					break
-				end
-				
-				bookshelf_id = db:rowexec("SELECT last_insert_rowid()")
-				insert_bookshelf_stmt:close()
-			end
-            
-            if bookshelf_id then
-                local insert_bookshelf_book_sql = [[
-                    INSERT INTO bookshelfs_books (bookshelfid, bookid, ts, is_deleted)
-                    VALUES (?, ?, ?, 0);
-                ]]
-                
-                local insert_bookshelf_book_stmt = db:prepare(insert_bookshelf_book_sql)
-                if not insert_bookshelf_book_stmt then
-                    logger.info("Ошибка: не удалось подготовить SQL-запрос для связи книги с полкой!")
-                    success = false
-                    break
+                if type(settings_row) == "table" then
+                    -- Обновляем существующие настройки
+                    local update_settings_sql = [[
+                        UPDATE books_settings 
+                        SET completed = ?, favorite = ?
+                        WHERE bookid = ? AND profileid = 1;
+                    ]]
+                    
+                    local update_settings_stmt = db:prepare(update_settings_sql)
+                    if not update_settings_stmt then
+                        logger.info("Ошибка: не удалось подготовить SQL-запрос для обновления настроек!")
+                        success = false
+                    else
+                        update_settings_stmt:bind1(1, completed)
+                        update_settings_stmt:bind1(2, favorite)
+                        update_settings_stmt:bind1(3, book_id)
+                        
+                        if update_settings_stmt:step() ~= SQ3.DONE then
+                            logger.info("Ошибка при обновлении настроек")
+                            success = false
+                        end
+                        update_settings_stmt:close()
+                    end
+                else
+                    -- Создаем новую запись настроек
+                    local insert_settings_sql = [[
+                        INSERT INTO books_settings (bookid, profileid, completed, favorite)
+                        VALUES (?, 1, ?, ?);
+                    ]]
+                    
+                    local insert_settings_stmt = db:prepare(insert_settings_sql)
+                    if not insert_settings_stmt then
+                        logger.info("Ошибка: не удалось подготовить SQL-запрос для создания настроек!")
+                        success = false
+                    else
+                        insert_settings_stmt:bind1(1, book_id)
+                        insert_settings_stmt:bind1(2, completed)
+                        insert_settings_stmt:bind1(3, favorite)
+                        
+                        if insert_settings_stmt:step() ~= SQ3.DONE then
+                            logger.info("Ошибка при создании настроек")
+                            success = false
+                        end
+                        insert_settings_stmt:close()
+                    end
                 end
-                
-                insert_bookshelf_book_stmt:bind1(1, bookshelf_id)
-                insert_bookshelf_book_stmt:bind1(2, book_id)
-                insert_bookshelf_book_stmt:bind1(3, current_timestamp)
-                
-                if insert_bookshelf_book_stmt:step() ~= SQ3.DONE then
-                    logger.info("Ошибка при создании связи книги с полкой")
-                    success = false
-                    break
-                end
-                insert_bookshelf_book_stmt:close()
             end
         end
     end
-	end
 
     if success then
         db:exec("COMMIT")
