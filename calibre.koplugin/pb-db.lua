@@ -5,6 +5,8 @@
 local logger = require("logger")
 local lfs = require("libs/libkoreader-lfs")
 local SQ3 = require("lua-ljsqlite3/init")
+local ffi = require("ffi")
+local inkview = ffi.load("inkview")
 local current_timestamp = os.time()
 
 local PocketBookDBHandler = {}
@@ -19,9 +21,35 @@ end
 
 function PocketBookDBHandler:saveBookToDatabase(arg, filename)
     local db_path = "/mnt/ext1/system/explorer-3/explorer-3.db"
-	collections_lookup_name = G_reader_settings:readSetting("collections_name")
-	read_lookup_name = G_reader_settings:readSetting("read_name")
-	favorite_lookup_name = G_reader_settings:readSetting("favorite_name")
+    collections_lookup_name = G_reader_settings:readSetting("collections_name")
+    read_lookup_name = G_reader_settings:readSetting("read_name")
+    favorite_lookup_name = G_reader_settings:readSetting("favorite_name")
+    
+    -- Добавляем отладочную информацию
+    logger.info("=== Начало отладки метаданных ===")
+    logger.info("Метаданные книги:", arg.metadata)
+    
+    if arg.metadata.user_metadata then
+        logger.info("user_metadata присутствует")
+        logger.info("Содержимое user_metadata:", arg.metadata.user_metadata)
+        
+        if arg.metadata.user_metadata[collections_lookup_name] then
+            logger.info("Найдены данные для collections_lookup_name:", collections_lookup_name)
+            logger.info("Содержимое:", arg.metadata.user_metadata[collections_lookup_name])
+            
+            if arg.metadata.user_metadata[collections_lookup_name]["#value#"] then
+                logger.info("Найдено значение #value#:", 
+                    arg.metadata.user_metadata[collections_lookup_name]["#value#"])
+            else
+                logger.info("Значение #value# отсутствует")
+            end
+        else
+            logger.info("Данные для collections_lookup_name отсутствуют:", collections_lookup_name)
+        end
+    else
+        logger.info("user_metadata отсутствует в метаданных")
+    end
+    logger.info("=== Конец отладки метаданных ===")
     
     local function getFirstLetter(str)
         if not str or str == "" then return "" end
@@ -311,11 +339,27 @@ function PocketBookDBHandler:saveBookToDatabase(arg, filename)
         success = false
     end
     files_stmt:close()
+	end
 	
-	if success and arg.metadata.user_metadata[collections_lookup_name] and arg.metadata.user_metadata[collections_lookup_name]["#value#"] then
-		local collections = arg.metadata.user_metadata[collections_lookup_name]["#value#"]
+	logger.info("metadata:", arg.metadata)
+	logger.info("user_metadata:", arg.metadata.user_metadata)
+	if arg.metadata.user_metadata[collections_lookup_name] then
+		logger.info("collections data:", arg.metadata.user_metadata[collections_lookup_name])
+		if arg.metadata.user_metadata[collections_lookup_name]["#value#"] then
+			logger.info("collections value:", arg.metadata.user_metadata[collections_lookup_name]["#value#"])
+		end
+	end
+	
+	if success then
+		-- Обработка коллекций
+		if arg.metadata.user_metadata[collections_lookup_name] and 
+		   arg.metadata.user_metadata[collections_lookup_name]["#value#"] then
+			local collections = arg.metadata.user_metadata[collections_lookup_name]["#value#"]
+			logger.info("Начало обработки коллекций:", collections)
 			
 			for _, collection_name in ipairs(collections) do
+				logger.info("Обработка коллекции:", collection_name)
+				
 				local select_bookshelf_sql = [[
 					SELECT id FROM bookshelfs 
 					WHERE name = ?;
@@ -327,14 +371,14 @@ function PocketBookDBHandler:saveBookToDatabase(arg, filename)
 					success = false
 					break
 				end
-
 				select_bookshelf_stmt:bind1(1, collection_name)
 				local bookshelf_row = select_bookshelf_stmt:step()
 				select_bookshelf_stmt:close()
-
+				
 				local bookshelf_id
 				if type(bookshelf_row) == "table" then
 					bookshelf_id = bookshelf_row[1]
+					logger.info("Найдена существующая полка, id:", bookshelf_id)
 					
 					-- Добавляем UPDATE запрос для обновления is_deleted
 					local update_sql = [[
@@ -358,6 +402,7 @@ function PocketBookDBHandler:saveBookToDatabase(arg, filename)
 					end
 					update_stmt:close()
 				else
+					logger.info("Создание новой полки:", collection_name)
 					local insert_bookshelf_sql = [[
 						INSERT INTO bookshelfs (name, is_deleted, ts, uuid)
 						VALUES (?, 0, ?, NULL);
@@ -381,38 +426,73 @@ function PocketBookDBHandler:saveBookToDatabase(arg, filename)
 					
 					bookshelf_id = db:rowexec("SELECT last_insert_rowid()")
 					insert_bookshelf_stmt:close()
+					logger.info("Создана новая полка, id:", bookshelf_id)
 				end
 				
 				if bookshelf_id then
-					local insert_bookshelf_book_sql = [[
-						INSERT INTO bookshelfs_books (bookshelfid, bookid, ts, is_deleted)
-						VALUES (?, ?, ?, 0);
+					-- Проверяем существующую связь
+					local check_link_sql = [[
+						SELECT 1 FROM bookshelfs_books 
+						WHERE bookshelfid = ? AND bookid = ?;
 					]]
 					
-					local insert_bookshelf_book_stmt = db:prepare(insert_bookshelf_book_sql)
-					if not insert_bookshelf_book_stmt then
-						logger.info("Ошибка: не удалось подготовить SQL-запрос для связи книги с полкой!")
-						success = false
-						break
-					end
+					local check_link_stmt = db:prepare(check_link_sql)
+					check_link_stmt:bind1(1, bookshelf_id)
+					check_link_stmt:bind1(2, book_id)
+					local existing_link = check_link_stmt:step()
+					check_link_stmt:close()
 					
-					insert_bookshelf_book_stmt:bind1(1, bookshelf_id)
-					insert_bookshelf_book_stmt:bind1(2, book_id)
-					insert_bookshelf_book_stmt:bind1(3, current_timestamp)
-					
-					if insert_bookshelf_book_stmt:step() ~= SQ3.DONE then
-						logger.info("Ошибка при создании связи книги с полкой")
-						success = false
-						break
+					if type(existing_link) ~= "table" then
+						logger.info("Создание связи книги с полкой")
+						local insert_bookshelf_book_sql = [[
+							INSERT INTO bookshelfs_books (bookshelfid, bookid, ts, is_deleted)
+							VALUES (?, ?, ?, 0);
+						]]
+						
+						local insert_bookshelf_book_stmt = db:prepare(insert_bookshelf_book_sql)
+						if not insert_bookshelf_book_stmt then
+							logger.info("Ошибка: не удалось подготовить SQL-запрос для связи книги с полкой!")
+							success = false
+							break
+						end
+						
+						insert_bookshelf_book_stmt:bind1(1, bookshelf_id)
+						insert_bookshelf_book_stmt:bind1(2, book_id)
+						insert_bookshelf_book_stmt:bind1(3, current_timestamp)
+						
+						if insert_bookshelf_book_stmt:step() ~= SQ3.DONE then
+							logger.info("Ошибка при создании связи книги с полкой")
+							success = false
+							break
+						end
+						insert_bookshelf_book_stmt:close()
+						logger.info("Связь книги с полкой создана успешно")
+					else
+						logger.info("Связь книги с полкой уже существует")
 					end
-					insert_bookshelf_book_stmt:close()
 				end
 			end
 		end
 	end
 
     if success then
+	
         -- Проверяем наличие меток в метаданных
+		local function GetCurrentProfileId()
+			local profile_name = inkview.GetCurrentProfile()
+			if profile_name == nil then
+				return 1
+			else
+				local stmt = pocketbookDbConn:prepare("SELECT id FROM profiles WHERE name = ?")
+				local profile_id = stmt:reset():bind(ffi.string(profile_name)):step()
+				stmt:close()
+				return profile_id[1]
+			end
+		end
+		
+		local profile_id = GetCurrentProfileId()
+		logger.info("Профиль:", profile_id)
+		
 		local has_read = arg.metadata.user_metadata 
 			and arg.metadata.user_metadata[read_lookup_name] 
 			and arg.metadata.user_metadata[read_lookup_name]["#value#"] == true
@@ -427,7 +507,7 @@ function PocketBookDBHandler:saveBookToDatabase(arg, filename)
             
             local select_settings_sql = [[
                 SELECT bookid FROM books_settings 
-                WHERE bookid = ? AND profileid = 1;
+                WHERE bookid = ? AND profileid = ?;
             ]]
             
             local select_settings_stmt = db:prepare(select_settings_sql)
@@ -444,7 +524,7 @@ function PocketBookDBHandler:saveBookToDatabase(arg, filename)
                     local update_settings_sql = [[
                         UPDATE books_settings 
                         SET completed = ?, favorite = ?
-                        WHERE bookid = ? AND profileid = 1;
+                        WHERE bookid = ? AND profileid = ?;
                     ]]
                     
                     local update_settings_stmt = db:prepare(update_settings_sql)
@@ -455,6 +535,7 @@ function PocketBookDBHandler:saveBookToDatabase(arg, filename)
                         update_settings_stmt:bind1(1, completed)
                         update_settings_stmt:bind1(2, favorite)
                         update_settings_stmt:bind1(3, book_id)
+						insert_settings_stmt:bind1(4, profile_id)
                         
                         if update_settings_stmt:step() ~= SQ3.DONE then
                             logger.info("Ошибка при обновлении настроек")
@@ -466,7 +547,7 @@ function PocketBookDBHandler:saveBookToDatabase(arg, filename)
                     -- Создаем новую запись настроек
                     local insert_settings_sql = [[
                         INSERT INTO books_settings (bookid, profileid, completed, favorite)
-                        VALUES (?, 1, ?, ?);
+                        VALUES (?, ?, ?, ?);
                     ]]
                     
                     local insert_settings_stmt = db:prepare(insert_settings_sql)
@@ -475,8 +556,9 @@ function PocketBookDBHandler:saveBookToDatabase(arg, filename)
                         success = false
                     else
                         insert_settings_stmt:bind1(1, book_id)
-                        insert_settings_stmt:bind1(2, completed)
-                        insert_settings_stmt:bind1(3, favorite)
+						insert_settings_stmt:bind1(2, profile_id)
+                        insert_settings_stmt:bind1(3, completed)
+                        insert_settings_stmt:bind1(4, favorite)
                         
                         if insert_settings_stmt:step() ~= SQ3.DONE then
                             logger.info("Ошибка при создании настроек")
