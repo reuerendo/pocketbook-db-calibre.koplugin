@@ -341,15 +341,6 @@ function PocketBookDBHandler:saveBookToDatabase(arg, filename)
     files_stmt:close()
 	end
 	
-	logger.info("metadata:", arg.metadata)
-	logger.info("user_metadata:", arg.metadata.user_metadata)
-	if arg.metadata.user_metadata[collections_lookup_name] then
-		logger.info("collections data:", arg.metadata.user_metadata[collections_lookup_name])
-		if arg.metadata.user_metadata[collections_lookup_name]["#value#"] then
-			logger.info("collections value:", arg.metadata.user_metadata[collections_lookup_name]["#value#"])
-		end
-	end
-	
 	if success then
 		-- Обработка коллекций
 		if arg.metadata.user_metadata[collections_lookup_name] and 
@@ -483,7 +474,7 @@ function PocketBookDBHandler:saveBookToDatabase(arg, filename)
 			if profile_name == nil then
 				return 1
 			else
-				local stmt = pocketbookDbConn:prepare("SELECT id FROM profiles WHERE name = ?")
+				local stmt = db:prepare("SELECT id FROM profiles WHERE name = ?")
 				local profile_id = stmt:reset():bind(ffi.string(profile_name)):step()
 				stmt:close()
 				return profile_id[1]
