@@ -8,6 +8,8 @@ The original wireless.lua and main.lua files should be replaced.
 ## Collections
 The plugin adds books to collections on the device. To use this function, you should specify the column lookup name in the calibre (in the #name format) in the plugin settings.
 
+## Read status and Favorite
+The module also supports read status and favorite marking. In the settings, you need to specify the lookup name for the "Read" and "Favorite" columns. Both columns should be of the yes/no type.
 
 *The program was tested on a PocketBook InkPad 4 and Touch Lux 5 devices.*
 
