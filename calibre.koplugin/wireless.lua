@@ -659,22 +659,20 @@ function CalibreWireless:getBookCount(arg)
         local book_id = CalibreMetadata:getBookId(index)
         
         
-        -- Если включена синхронизация статуса чтения
-        if supports_sync and (read_status_column or read_date_column) then
-            -- Получаем путь к файлу метаданных для этой книги
-            local file_path = G_reader_settings:readSetting("inbox_dir") .. "/" .. book.lpath
-            local sdr_dir = DocSettings:getSidecarDir(file_path)
-            local metadata_file = sdr_dir .. "/metadata." .. util.getFileNameSuffix(file_path) .. ".lua"
-            
-            
-            -- Проверяем, существует ли файл метаданных
-            if lfs.attributes(metadata_file, "mode") == "file" then
-                
-                -- Загружаем метаданные
-                local ok, doc_settings = pcall(dofile, metadata_file)
-                if ok and doc_settings and doc_settings.summary then
-                    
-					-- Добавляем информацию о статусе чтения только если он "complete"
+		-- Если включена синхронизация статуса чтения
+		if supports_sync and (read_status_column or read_date_column) then
+			-- Получаем путь к файлу метаданных для этой книги
+			local file_path = G_reader_settings:readSetting("inbox_dir") .. "/" .. book.lpath
+			local sdr_dir = DocSettings:getSidecarDir(file_path)
+			local metadata_file = sdr_dir .. "/metadata." .. util.getFileNameSuffix(file_path) .. ".lua"
+			
+			-- Проверяем, существует ли файл метаданных
+			-- Мы устанавливаем статус прочтения только если у нас есть файл метаданных
+			if lfs.attributes(metadata_file, "mode") == "file" then
+				-- Загружаем метаданные
+				local ok, doc_settings = pcall(dofile, metadata_file)
+				if ok and doc_settings and doc_settings.summary then
+					-- Добавляем информацию о статусе чтения только если статус "complete"
 					if read_status_column and doc_settings.summary.status then
 						local status = doc_settings.summary.status
 						
@@ -682,24 +680,26 @@ function CalibreWireless:getBookCount(arg)
 							book_id["_is_read_"] = true
 							book_id["_sync_type_"] = "read"
 							logger.info("Setting *is*read_=true, *sync*type_=read")
+						else
+							-- Для других статусов мы НЕ устанавливаем статус прочтения,
+							-- чтобы не перезаписывать существующие значения в Calibre
+							logger.info("Book not marked as read, keeping existing Calibre status")
 						end
 					end
-                    
-                    -- Добавляем информацию о дате последнего чтения только если она есть
-                    if read_date_column and doc_settings.summary.modified then
-                        book_id["_last_read_date_"] = doc_settings.summary.modified
-                    end
-                else
-                    logger.info("Failed to load metadata or no summary section")
-                    -- Не устанавливаем никаких значений для _is_read_, _sync_type_ и _last_read_date_
-                end
-            else
-                logger.info("Metadata file does not exist")
-                -- Не устанавливаем никаких значений для _is_read_, _sync_type_ и _last_read_date_
-            end
-        else
-            logger.info("Sync not supported or columns not set")
-        end
+					
+					-- Добавляем информацию о дате последнего чтения только если она есть
+					if read_date_column and doc_settings.summary.modified then
+						book_id["_last_read_date_"] = doc_settings.summary.modified
+					end
+				end
+			else
+				logger.info("Metadata file does not exist, keeping existing Calibre read status")
+				-- НЕ устанавливаем никаких значений для _is_read_, _sync_type_ и _last_read_date_
+				-- чтобы не перезаписать статус в Calibre
+			end
+		else
+			logger.info("Sync not supported or columns not set")
+		end
         
         -- Отладка: вывод отправляемых данных
         logger.info("Sending book data to Calibre:", book_id)
