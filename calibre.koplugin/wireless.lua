@@ -6,9 +6,9 @@
 local BD = require("ui/bidi")
 local CalibreExtensions = require("extensions")
 local CalibreMetadata = require("metadata")
-local CalibreSearch = require("search")
 local ConfirmBox = require("ui/widget/confirmbox")
 local Device = require("device")
+local DocSettings = require("docsettings")
 local FFIUtil = require("ffi/util")
 local InputDialog = require("ui/widget/inputdialog")
 local InfoMessage = require("ui/widget/infomessage")
@@ -286,9 +286,6 @@ function CalibreWireless:disconnect()
         self.calibre_messagequeue = nil
     end
     CalibreMetadata:clean()
-
-    -- Assume the library content was modified, as such, invalidate our Search metadata cache.
-    CalibreSearch:invalidateCache()
 end
 
 function CalibreWireless:reconnect()
@@ -339,6 +336,8 @@ function CalibreWireless:onReceiveJSON(data)
                 self:setLibraryInfo(arg)
             elseif self.opnames[opcode] == 'GET_BOOK_COUNT' then
                 self:getBookCount(arg)
+            -- elseif self.opnames[opcode] == 'GET_BOOK_METADATA' then
+                -- self:getBookMetadata(arg)
             elseif self.opnames[opcode] == 'SEND_BOOK' then
                 self:sendBook(arg)
             elseif self.opnames[opcode] == 'DELETE_BOOK' then
@@ -378,7 +377,7 @@ function CalibreWireless:getInitInfo(arg)
     end
     self.calibre.version = arg.calibre_version
     self.calibre.version_string = s
-	
+    
     local getPasswordHash = function()
         local password = G_reader_settings:readSetting("calibre_wireless_password")
         local challenge = arg.passwordChallenge
@@ -400,6 +399,8 @@ function CalibreWireless:getInitInfo(arg)
         canStreamBooks = true,
         canStreamMetadata = true,
         canUseCachedMetadata = true,
+        isReadSyncCol = G_reader_settings:readSetting("read_name"),
+        isReadDateSyncCol = G_reader_settings:readSetting("read_date_name"),
         ccVersionNumber = self.version,
         coverHeight = 240,
         deviceKind = self.model,
@@ -463,7 +464,7 @@ function CalibreWireless:setCollectionsLookupName()
     local lookup_name_dialog
     lookup_name_dialog = InputDialog:new{
         title = _("Set Collections Lookup Name"),
-        input = G_reader_settings:readSetting("collections") or "",
+        input = G_reader_settings:readSetting("collections_name") or "",
         buttons = {{
             {
                 text = _("Cancel"),
@@ -477,14 +478,9 @@ function CalibreWireless:setCollectionsLookupName()
                 callback = function()
                     local name = lookup_name_dialog:getInputText()
                     if lookupNameCheck(name) then
-                        -- Сохраняем значение в переменную, например, глобальную
-                        collections = name
-                        -- Также можно сохранить в настройках
-                        G_reader_settings:saveSetting("collections", name)
+                        G_reader_settings:saveSetting("collections_name", name)
                     else
-                        -- Если строка не начинается с '#', удаляем значение
-                        collections = nil
-                        G_reader_settings:delSetting("collections")
+                        G_reader_settings:delSetting("collections_name")
                     end
                     UIManager:close(lookup_name_dialog)
                 end,
@@ -521,14 +517,48 @@ function CalibreWireless:setReadLookupName()
                 callback = function()
                     local name = lookup_name_dialog:getInputText()
                     if lookupNameCheck(name) then
-                        -- Сохраняем значение в переменную, например, глобальную
-                        read_name = name
-                        -- Также можно сохранить в настройках
                         G_reader_settings:saveSetting("read_name", name)
                     else
-                        -- Если строка не начинается с '#', удаляем значение
-                        collections = nil
                         G_reader_settings:delSetting("read_name")
+                    end
+                    UIManager:close(lookup_name_dialog)
+                end,
+            },
+        }},
+    }
+    UIManager:show(lookup_name_dialog)
+    lookup_name_dialog:onShowKeyboard()
+end
+
+function CalibreWireless:setReadDateLookupName()
+    local function lookupNameCheck(name)
+        -- Проверяем, начинается ли строка с символа '#'
+        if type(name) == "string" and name:sub(1, 1) == "#" then
+            return true
+        end
+        return false
+    end
+
+    local lookup_name_dialog
+    lookup_name_dialog = InputDialog:new{
+        title = _("Set Read Date Lookup Name"),
+        input = G_reader_settings:readSetting("read_date_name") or "",
+        buttons = {{
+            {
+                text = _("Cancel"),
+                id = "close",
+                callback = function()
+                    UIManager:close(lookup_name_dialog)
+                end,
+            },
+            {
+                text = _("Set Name"),
+                callback = function()
+                    local name = lookup_name_dialog:getInputText()
+                    if lookupNameCheck(name) then
+                        G_reader_settings:saveSetting("read_date_name", name)
+                    else
+                        G_reader_settings:delSetting("read_date_name")
                     end
                     UIManager:close(lookup_name_dialog)
                 end,
@@ -565,13 +595,8 @@ function CalibreWireless:setFavoriteLookupName()
                 callback = function()
                     local name = lookup_name_dialog:getInputText()
                     if lookupNameCheck(name) then
-                        -- Сохраняем значение в переменную, например, глобальную
-                        favorite_name = name
-                        -- Также можно сохранить в настройках
                         G_reader_settings:saveSetting("favorite_name", name)
                     else
-                        -- Если строка не начинается с '#', удаляем значение
-                        collections = nil
                         G_reader_settings:delSetting("favorite_name")
                     end
                     UIManager:close(lookup_name_dialog)
@@ -616,18 +641,73 @@ function CalibreWireless:setLibraryInfo(arg)
 end
 
 function CalibreWireless:getBookCount(arg)
-    logger.dbg("GET_BOOK_COUNT", arg)
+    logger.info("GET_BOOK_COUNT", arg)
+    
+    
+    local supports_sync = arg.supportsSync
+    local read_status_column = G_reader_settings:readSetting("read_name")
+    local read_date_column = G_reader_settings:readSetting("read_date_name")
+    
     local books = {
         willStream = true,
         willScan = true,
         count = #CalibreMetadata.books,
     }
     self:sendJsonData('OK', books)
-    for index, _ in ipairs(CalibreMetadata.books) do
-        local book = CalibreMetadata:getBookId(index)
-        logger.dbg(string.format("sending book id %d/%d", index, #CalibreMetadata.books))
-        self:sendJsonData('OK', book)
+    
+    for index, book in ipairs(CalibreMetadata.books) do
+        local book_id = CalibreMetadata:getBookId(index)
+        
+        
+        -- Если включена синхронизация статуса чтения
+        if supports_sync and (read_status_column or read_date_column) then
+            -- Получаем путь к файлу метаданных для этой книги
+            local file_path = G_reader_settings:readSetting("inbox_dir") .. "/" .. book.lpath
+            local sdr_dir = DocSettings:getSidecarDir(file_path)
+            local metadata_file = sdr_dir .. "/metadata." .. util.getFileNameSuffix(file_path) .. ".lua"
+            
+            
+            -- Проверяем, существует ли файл метаданных
+            if lfs.attributes(metadata_file, "mode") == "file" then
+                
+                -- Загружаем метаданные
+                local ok, doc_settings = pcall(dofile, metadata_file)
+                if ok and doc_settings and doc_settings.summary then
+                    
+					-- Добавляем информацию о статусе чтения только если он "complete"
+					if read_status_column and doc_settings.summary.status then
+						local status = doc_settings.summary.status
+						
+						if status == "complete" then
+							book_id["_is_read_"] = true
+							book_id["_sync_type_"] = "read"
+							logger.info("Setting *is*read_=true, *sync*type_=read")
+						end
+					end
+                    
+                    -- Добавляем информацию о дате последнего чтения только если она есть
+                    if read_date_column and doc_settings.summary.modified then
+                        book_id["_last_read_date_"] = doc_settings.summary.modified
+                    end
+                else
+                    logger.info("Failed to load metadata or no summary section")
+                    -- Не устанавливаем никаких значений для _is_read_, _sync_type_ и _last_read_date_
+                end
+            else
+                logger.info("Metadata file does not exist")
+                -- Не устанавливаем никаких значений для _is_read_, _sync_type_ и _last_read_date_
+            end
+        else
+            logger.info("Sync not supported or columns not set")
+        end
+        
+        -- Отладка: вывод отправляемых данных
+        logger.info("Sending book data to Calibre:", book_id)
+        logger.info(string.format("sending book id %d/%d", index, #CalibreMetadata.books))
+        self:sendJsonData('OK', book_id)
     end
+    
+    logger.info("Finished sending book data to Calibre")
 end
 
 function CalibreWireless:noop(arg)
@@ -665,8 +745,6 @@ end
 function CalibreWireless:sendBook(arg)
     logger.dbg("SEND_BOOK", arg)
     local inbox_dir = G_reader_settings:readSetting("inbox_dir")
-	local collections_lookup_name = G_reader_settings:readSetting("collections")
-	logger.info("Collections", collections_lookup_name)
     local filename = inbox_dir .. "/" .. arg.lpath
     local fits = getFreeSpace(inbox_dir) >= (arg.length + 128 * 1024)
     local to_write_bytes = arg.length
@@ -719,7 +797,7 @@ function CalibreWireless:sendBook(arg)
                 updateDir(inbox_dir)
 				
 				if Device:isPocketBook() then
-					PocketBookDBHandler:saveBookToDatabase(arg, filename, collections_lookup_name)
+					PocketBookDBHandler:saveBookToDatabase(arg, filename)
 				end
 				
             end
