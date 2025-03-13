@@ -10,6 +10,7 @@ The plugin adds books to collections on the device. To use this function, you sh
 
 ## Read status and Favorite
 The module also supports read status and favorite marking. In the settings, you need to specify the lookup name for the "Read" and "Favorite" columns. Both columns should be of the yes/no type.
+The program can transmit the status and date of reading to Calibre when connected. Please make a backup copy of your Calibre database.
 
 *The program was tested on a PocketBook InkPad 4 and Touch Lux 5 devices.*
 
