@@ -667,35 +667,33 @@ function CalibreWireless:getBookCount(arg)
 			local metadata_file = sdr_dir .. "/metadata." .. util.getFileNameSuffix(file_path) .. ".lua"
 			
 			-- Проверяем, существует ли файл метаданных
-			-- Мы устанавливаем статус прочтения только если у нас есть файл метаданных
 			if lfs.attributes(metadata_file, "mode") == "file" then
 				-- Загружаем метаданные
 				local ok, doc_settings = pcall(dofile, metadata_file)
 				if ok and doc_settings and doc_settings.summary then
-					-- Добавляем информацию о статусе чтения только если статус "complete"
-					if read_status_column and doc_settings.summary.status then
-						local status = doc_settings.summary.status
-						
-						if status == "complete" then
+					local status = doc_settings.summary.status
+					
+					-- Добавляем информацию о статусе чтения и дате прочтения только если статус "complete"
+					if status == "complete" then
+						if read_status_column then
 							book_id["_is_read_"] = true
 							book_id["_sync_type_"] = "read"
 							logger.info("Setting *is*read_=true, *sync*type_=read")
-						else
-							-- Для других статусов мы НЕ устанавливаем статус прочтения,
-							-- чтобы не перезаписывать существующие значения в Calibre
-							logger.info("Book not marked as read, keeping existing Calibre status")
 						end
+						
+						-- Передаем дату только если книга прочитана полностью
+						if read_date_column and doc_settings.summary.modified then
+							book_id["_last_read_date_"] = doc_settings.summary.modified
+							logger.info("Setting *last*read*date_=" .. doc_settings.summary.modified)
+						end
+					else
+						logger.info("Book not marked as complete, not sending read status or date")
 					end
-					
-					-- Добавляем информацию о дате последнего чтения только если она есть
-					if read_date_column and doc_settings.summary.modified then
-						book_id["_last_read_date_"] = doc_settings.summary.modified
-					end
+				else
+					logger.info("Failed to load metadata or no summary section")
 				end
 			else
-				logger.info("Metadata file does not exist, keeping existing Calibre read status")
-				-- НЕ устанавливаем никаких значений для _is_read_, _sync_type_ и _last_read_date_
-				-- чтобы не перезаписать статус в Calibre
+				logger.info("Metadata file does not exist")
 			end
 		else
 			logger.info("Sync not supported or columns not set")
