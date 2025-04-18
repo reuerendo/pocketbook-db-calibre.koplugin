@@ -47,12 +47,9 @@ end
 -- update the view of the dir if we are currently browsing it.
 local function updateDir(dir)
     local FileManager = require("apps/filemanager/filemanager")
-    if FileManager:getCurrentDir() == dir then
-        -- getCurrentDir() will return nil (well, nothing, technically) if there isn't an FM instance, so,
-        -- unless we were passed a nil, this is technically redundant.
-        if FileManager.instance then
-            FileManager.instance:reinit(dir)
-        end
+    local fc = FileManager.instance and FileManager.instance.file_chooser
+    if fc and fc.path == dir then
+        fc:refreshPath()
     end
 end
 
@@ -336,8 +333,6 @@ function CalibreWireless:onReceiveJSON(data)
                 self:setLibraryInfo(arg)
             elseif self.opnames[opcode] == 'GET_BOOK_COUNT' then
                 self:getBookCount(arg)
-            -- elseif self.opnames[opcode] == 'GET_BOOK_METADATA' then
-                -- self:getBookMetadata(arg)
             elseif self.opnames[opcode] == 'SEND_BOOK' then
                 self:sendBook(arg)
             elseif self.opnames[opcode] == 'DELETE_BOOK' then
@@ -377,7 +372,6 @@ function CalibreWireless:getInitInfo(arg)
     end
     self.calibre.version = arg.calibre_version
     self.calibre.version_string = s
-    
     local getPasswordHash = function()
         local password = G_reader_settings:readSetting("calibre_wireless_password")
         local challenge = arg.passwordChallenge
