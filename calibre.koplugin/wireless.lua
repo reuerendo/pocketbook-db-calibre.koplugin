@@ -739,8 +739,7 @@ function CalibreWireless:setLibraryInfo(arg)
 end
 
 function CalibreWireless:getBookCount(arg)
-    logger.info("GET_BOOK_COUNT", arg)
-    
+    logger.dbg("GET_BOOK_COUNT", arg)
     
     local supports_sync = arg.supportsSync
     local read_status_column = G_reader_settings:readSetting("read_name")
@@ -753,53 +752,39 @@ function CalibreWireless:getBookCount(arg)
     }
     self:sendJsonData('OK', books)
     
+    -- Отправляем информацию обо всех книгах
     for index, book in ipairs(CalibreMetadata.books) do
         local book_id = CalibreMetadata:getBookId(index)
         
+        -- Если включена синхронизация статуса чтения, проверяем метаданные
+        if supports_sync and (read_status_column or read_date_column) then
+            local file_path = G_reader_settings:readSetting("inbox_dir") .. "/" .. book.lpath
+            local sdr_dir = DocSettings:getSidecarDir(file_path)
+            local metadata_file = sdr_dir .. "/metadata." .. util.getFileNameSuffix(file_path) .. ".lua"
+            
+            -- Проверяем, существует ли файл метаданных
+            if lfs.attributes(metadata_file, "mode") == "file" then
+                local ok, doc_settings = pcall(dofile, metadata_file)
+                if ok and doc_settings and doc_settings.summary then
+                    local status = doc_settings.summary.status
+                    
+                    -- Отмечаем как прочитанную только если статус "complete"
+                    if status == "complete" then
+                        if read_status_column then
+                            book_id["_is_read_"] = true
+                            book_id["_sync_type_"] = "read"
+                        end
+                        
+                        if read_date_column and doc_settings.summary.modified then
+                            book_id["_last_read_date_"] = doc_settings.summary.modified
+                        end
+                    end
+                end
+            end
+            -- Если файла метаданных нет, книга останется без полей _is_read_ и _last_read_date_
+            -- что означает, что статус чтения не будет изменен в Calibre
+        end
         
-		-- Если включена синхронизация статуса чтения
-		if supports_sync and (read_status_column or read_date_column) then
-			-- Получаем путь к файлу метаданных для этой книги
-			local file_path = G_reader_settings:readSetting("inbox_dir") .. "/" .. book.lpath
-			local sdr_dir = DocSettings:getSidecarDir(file_path)
-			local metadata_file = sdr_dir .. "/metadata." .. util.getFileNameSuffix(file_path) .. ".lua"
-			
-			-- Проверяем, существует ли файл метаданных
-			if lfs.attributes(metadata_file, "mode") == "file" then
-				-- Загружаем метаданные
-				local ok, doc_settings = pcall(dofile, metadata_file)
-				if ok and doc_settings and doc_settings.summary then
-					local status = doc_settings.summary.status
-					
-					-- Добавляем информацию о статусе чтения и дате прочтения только если статус "complete"
-					if status == "complete" then
-						if read_status_column then
-							book_id["_is_read_"] = true
-							book_id["_sync_type_"] = "read"
-							-- logger.info("Setting *is*read_=true, *sync*type_=read")
-						end
-						
-						-- Передаем дату только если книга прочитана полностью
-						if read_date_column and doc_settings.summary.modified then
-							book_id["_last_read_date_"] = doc_settings.summary.modified
-							-- logger.info("Setting *last*read*date_=" .. doc_settings.summary.modified)
-						end
-					else
-						-- logger.info("Book not marked as complete, not sending read status or date")
-					end
-				else
-					-- logger.info("Failed to load metadata or no summary section")
-				end
-			else
-				-- logger.info("Metadata file does not exist")
-			end
-		else
-			logger.info("Sync not supported or columns not set")
-		end
-        
-        -- Отладка: вывод отправляемых данных
-        -- logger.info("Sending book data to Calibre:", book_id)
-        -- logger.info(string.format("sending book id %d/%d", index, #CalibreMetadata.books))
         self:sendJsonData('OK', book_id)
     end
     
