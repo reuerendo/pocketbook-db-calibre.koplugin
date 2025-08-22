@@ -6,7 +6,7 @@ Add files [pb-dp.lua](calibre.koplugin/pb-db.lua), [main.lua](calibre.koplugin/m
 The original wireless.lua and main.lua files should be replaced.
 
 ## Collections
-The plugin adds books to collections on the device and to the KOreader Collections. To use this function, you should specify the column lookup name in the calibre (in the #name format) in the SmartDevice App Interface settings.
+The plugin can add books to collections in the PocketBook library and to the KOreader collections. To use this function, you should specify the column lookup name in the calibre (in the #name format) in the SmartDevice App Interface settings.
 
 <img src="/col.png" width="445">
 
