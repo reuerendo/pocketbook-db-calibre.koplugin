@@ -278,13 +278,6 @@ function Calibre:getWirelessMenuTable()
                 CalibreWireless:setInboxDir()
             end,
         },
-		{
-            text = _("Set collections lookup name"),
-            enabled_func = isEnabled,
-            callback = function()
-                CalibreWireless:setCollectionsLookupName()
-            end,
-        },
         {
             text = _("Set read lookup name"),
             enabled_func = isEnabled,

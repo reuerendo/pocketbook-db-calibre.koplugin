@@ -434,6 +434,8 @@ function CalibreWireless:onReceiveJSON(data)
                 self:setLibraryInfo(arg)
             elseif opcode == OPCODES.GET_BOOK_COUNT then
                 self:getBookCount(arg)
+			elseif opcode == OPCODES.SEND_BOOKLISTS then
+                self:sendBooklists(arg)
             elseif opcode == OPCODES.SEND_BOOK then
                 self:sendBook(arg)
             elseif opcode == OPCODES.SEND_BOOK_METADATA then
@@ -497,6 +499,7 @@ function CalibreWireless:getInitInfo(arg)
         canStreamBooks = true,
         canStreamMetadata = true,
         canUseCachedMetadata = true,
+		canAcceptCollections = true,
         isReadSyncCol = G_reader_settings:readSetting("read_name"),
         isReadDateSyncCol = G_reader_settings:readSetting("read_date_name"),
         ccVersionNumber = self.version,
@@ -550,44 +553,44 @@ function CalibreWireless:setPassword()
     password_dialog:onShowKeyboard()
 end
 
-function CalibreWireless:setCollectionsLookupName()
-    local function lookupNameCheck(name)
-        -- Проверяем, начинается ли строка с символа '#'
-        if type(name) == "string" and name:sub(1, 1) == "#" then
-            return true
-        end
-        return false
-    end
+-- function CalibreWireless:setCollectionsLookupName()
+    -- local function lookupNameCheck(name)
+        -- -- Проверяем, начинается ли строка с символа '#'
+        -- if type(name) == "string" and name:sub(1, 1) == "#" then
+            -- return true
+        -- end
+        -- return false
+    -- end
 
-    local lookup_name_dialog
-    lookup_name_dialog = InputDialog:new{
-        title = _("Set Collections Lookup Name"),
-        input = G_reader_settings:readSetting("collections_name") or "",
-        buttons = {{
-            {
-                text = _("Cancel"),
-                id = "close",
-                callback = function()
-                    UIManager:close(lookup_name_dialog)
-                end,
-            },
-            {
-                text = _("Set Name"),
-                callback = function()
-                    local name = lookup_name_dialog:getInputText()
-                    if lookupNameCheck(name) then
-                        G_reader_settings:saveSetting("collections_name", name)
-                    else
-                        G_reader_settings:delSetting("collections_name")
-                    end
-                    UIManager:close(lookup_name_dialog)
-                end,
-            },
-        }},
-    }
-    UIManager:show(lookup_name_dialog)
-    lookup_name_dialog:onShowKeyboard()
-end
+    -- local lookup_name_dialog
+    -- lookup_name_dialog = InputDialog:new{
+        -- title = _("Set Collections Lookup Name"),
+        -- input = G_reader_settings:readSetting("collections_name") or "",
+        -- buttons = {{
+            -- {
+                -- text = _("Cancel"),
+                -- id = "close",
+                -- callback = function()
+                    -- UIManager:close(lookup_name_dialog)
+                -- end,
+            -- },
+            -- {
+                -- text = _("Set Name"),
+                -- callback = function()
+                    -- local name = lookup_name_dialog:getInputText()
+                    -- if lookupNameCheck(name) then
+                        -- G_reader_settings:saveSetting("collections_name", name)
+                    -- else
+                        -- G_reader_settings:delSetting("collections_name")
+                    -- end
+                    -- UIManager:close(lookup_name_dialog)
+                -- end,
+            -- },
+        -- }},
+    -- }
+    -- UIManager:show(lookup_name_dialog)
+    -- lookup_name_dialog:onShowKeyboard()
+-- end
 
 function CalibreWireless:setReadLookupName()
     local function lookupNameCheck(name)
@@ -789,6 +792,62 @@ function CalibreWireless:getBookCount(arg)
     end
     
     logger.info("Finished sending book data to Calibre")
+end
+
+function CalibreWireless:sendBooklists(arg)
+    logger.info("SEND_BOOKLISTS", arg)
+    
+    -- Process collections for PocketBook if they exist
+    if Device:isPocketBook() and arg.collections then
+        PocketBookDBHandler:processCollections(arg)
+    end
+    
+    -- Process collections for KOReader's built-in collection system
+    if arg.collections then
+        local ReadCollection = require("readcollection")
+        local inbox_dir = G_reader_settings:readSetting("inbox_dir")
+        
+        if not inbox_dir then
+            logger.warn("No inbox directory set, skipping collection processing")
+            return
+        end
+        
+        logger.info("Processing collections for KOReader")
+        
+        for collection_full_name, book_paths in pairs(arg.collections) do
+            -- Extract collection name by removing column name in parentheses
+            local collection_name = collection_full_name:match("^(.-)%s*%(.*%)$") or collection_full_name
+            logger.dbg("Processing collection:", collection_name, "from:", collection_full_name)
+            
+            -- Ensure collection exists
+            if not ReadCollection.coll[collection_name] then
+                ReadCollection:addCollection(collection_name)
+                logger.dbg("Created new collection:", collection_name)
+            end
+            
+            -- Process each book in the collection
+            for _, book_path in ipairs(book_paths) do
+                local full_path = inbox_dir .. "/" .. book_path
+                
+                -- Check if file exists
+                if lfs.attributes(full_path, "mode") == "file" then
+                    -- Check if book is already in collection to avoid duplicates
+                    if not ReadCollection:isFileInCollection(full_path, collection_name) then
+                        ReadCollection:addItem(full_path, collection_name)
+                        logger.dbg("Added to collection", collection_name, ":", book_path)
+                    else
+                        logger.dbg("Book already in collection", collection_name, ":", book_path)
+                    end
+                else
+                    logger.warn("Book file not found:", full_path)
+                end
+            end
+        end
+        
+        -- Save collections to disk
+        ReadCollection:write()
+        logger.info("Collections updated and saved")
+    end
 end
 
 function CalibreWireless:noop(arg)
