@@ -328,6 +328,132 @@ function PocketBookDBHandler:saveBookToDatabase(arg, filename)
         end
         files_stmt:close()
     end
+	
+	if success then
+		-- Обработка коллекций
+		if arg.metadata.user_metadata and 
+		   arg.metadata.user_metadata[collections_lookup_name] and 
+		   arg.metadata.user_metadata[collections_lookup_name]["#value#"] then
+			local collections = arg.metadata.user_metadata[collections_lookup_name]["#value#"]
+			logger.info("Начало обработки коллекций:", collections)
+			
+			for _, collection_name in ipairs(collections) do
+				logger.info("Обработка коллекции:", collection_name)
+				
+				local select_bookshelf_sql = [[
+					SELECT id FROM bookshelfs 
+					WHERE name = ?;
+				]]
+				
+				local select_bookshelf_stmt = db:prepare(select_bookshelf_sql)
+				if not select_bookshelf_stmt then
+					logger.info("Ошибка: не удалось подготовить SQL-запрос для проверки полки!")
+					success = false
+					break
+				end
+				select_bookshelf_stmt:bind1(1, collection_name)
+				local bookshelf_row = select_bookshelf_stmt:step()
+				select_bookshelf_stmt:close()
+				
+				local bookshelf_id
+				if type(bookshelf_row) == "table" then
+					bookshelf_id = bookshelf_row[1]
+					logger.info("Найдена существующая полка, id:", bookshelf_id)
+					
+					-- Добавляем UPDATE запрос для обновления is_deleted
+					local update_sql = [[
+						UPDATE bookshelfs 
+						SET is_deleted = 0 
+						WHERE rowid = ?;
+					]]
+					
+					local update_stmt = db:prepare(update_sql)
+					if not update_stmt then
+						logger.info("Ошибка: не удалось подготовить SQL-запрос для обновления is_deleted!")
+						success = false
+						break
+					end
+					
+					update_stmt:bind1(1, bookshelf_id)
+					if update_stmt:step() ~= SQ3.DONE then
+						logger.info("Ошибка при обновлении is_deleted")
+						success = false
+						break
+					end
+					update_stmt:close()
+				else
+					logger.info("Создание новой полки:", collection_name)
+					local insert_bookshelf_sql = [[
+						INSERT INTO bookshelfs (name, is_deleted, ts, uuid)
+						VALUES (?, 0, ?, NULL);
+					]]
+					
+					local insert_bookshelf_stmt = db:prepare(insert_bookshelf_sql)
+					if not insert_bookshelf_stmt then
+						logger.info("Ошибка: не удалось подготовить SQL-запрос для создания полки!")
+						success = false
+						break
+					end
+					
+					insert_bookshelf_stmt:bind1(1, collection_name)
+					insert_bookshelf_stmt:bind1(2, current_timestamp)
+					
+					if insert_bookshelf_stmt:step() ~= SQ3.DONE then
+						logger.info("Ошибка при создании полки")
+						success = false
+						break
+					end
+					
+					bookshelf_id = db:rowexec("SELECT last_insert_rowid()")
+					insert_bookshelf_stmt:close()
+					logger.info("Создана новая полка, id:", bookshelf_id)
+				end
+				
+				if bookshelf_id then
+					-- Проверяем существующую связь
+					local check_link_sql = [[
+						SELECT 1 FROM bookshelfs_books 
+						WHERE bookshelfid = ? AND bookid = ?;
+					]]
+					
+					local check_link_stmt = db:prepare(check_link_sql)
+					check_link_stmt:bind1(1, bookshelf_id)
+					check_link_stmt:bind1(2, book_id)
+					local existing_link = check_link_stmt:step()
+					check_link_stmt:close()
+					
+					if type(existing_link) ~= "table" then
+						logger.info("Создание связи книги с полкой")
+						local insert_bookshelf_book_sql = [[
+							INSERT INTO bookshelfs_books (bookshelfid, bookid, ts, is_deleted)
+							VALUES (?, ?, ?, 0);
+						]]
+						
+						local insert_bookshelf_book_stmt = db:prepare(insert_bookshelf_book_sql)
+						if not insert_bookshelf_book_stmt then
+							logger.info("Ошибка: не удалось подготовить SQL-запрос для связи книги с полкой!")
+							success = false
+							break
+						end
+						
+						insert_bookshelf_book_stmt:bind1(1, bookshelf_id)
+						insert_bookshelf_book_stmt:bind1(2, book_id)
+						insert_bookshelf_book_stmt:bind1(3, current_timestamp)
+						
+						if insert_bookshelf_book_stmt:step() ~= SQ3.DONE then
+							logger.info("Ошибка при создании связи книги с полкой")
+							success = false
+							break
+						end
+						insert_bookshelf_book_stmt:close()
+						logger.info("Связь книги с полкой создана успешно")
+					else
+						logger.info("Связь книги с полкой уже существует")
+					end
+				end
+			end
+		end
+	end
 
     if success then
         -- Check for tags in metadata
@@ -380,22 +506,6 @@ function PocketBookDBHandler:saveBookToDatabase(arg, filename)
                         local_time.year, local_time.month, local_time.day)
                 end
             end
-        end
-        
-        -- Save to DocSettings
-        if has_read or has_favorite or completed_date then
-            local DocSettings = require("docsettings")
-            local doc_settings = DocSettings:open(filename)
-            
-            if has_read then
-                doc_settings:saveSetting("summary", {status = "complete"})
-            end
-            
-            if completed_date then
-                doc_settings:saveSetting("summary", {status = "complete", modified = completed_date})
-            end
-            
-            doc_settings:flush()
         end
         
         -- Process read/favorite status in database
@@ -483,285 +593,400 @@ function PocketBookDBHandler:saveBookToDatabase(arg, filename)
     logger.info("База данных закрыта")
 end
 
--- Function to process collections from SEND_BOOKLISTS
-function PocketBookDBHandler:processCollections(collections_data)
-    
-    if not collections_data.collections then
-        logger.info("Collections data missing")
-        return
-    end
-    
-    logger.info("=== Starting collections processing from SEND_BOOKLISTS ===")
+function PocketBookDBHandler:syncCollections(collections_data, inbox_dir)
     
     local db = SQ3.open(db_path, "rw")
     if not db then
-        logger.info("Error: Failed to open database for collections processing")
+        logger.warn("Не удалось открыть базу данных PocketBook")
+        return
+    end
+    
+    db:exec("PRAGMA busy_timeout = 5000;")
+    db:exec("BEGIN TRANSACTION")
+    
+    local current_timestamp = os.time()
+    local success = true
+    
+    logger.info("Начало синхронизации коллекций PocketBook")
+    
+    for collection_full_name, book_paths in pairs(collections_data) do
+        -- Извлекаем имя коллекции, убирая название столбца в скобках
+        local collection_name = collection_full_name:match("^(.-)%s*%(.*%)$") or collection_full_name
+        logger.dbg("Обрабатываем коллекцию:", collection_name)
+        
+        -- Проверяем существование коллекции
+        local select_bookshelf_sql = [[
+            SELECT id FROM bookshelfs WHERE name = ?;
+        ]]
+        
+        local bookshelf_stmt = db:prepare(select_bookshelf_sql)
+        if not bookshelf_stmt then
+            logger.warn("Не удалось подготовить запрос для поиска коллекции")
+            success = false
+            break
+        end
+        
+        bookshelf_stmt:bind1(1, collection_name)
+        local bookshelf_row = bookshelf_stmt:step()
+        bookshelf_stmt:close()
+        
+        local bookshelf_id
+        if type(bookshelf_row) == "table" then
+            bookshelf_id = bookshelf_row[1]
+            -- Активируем коллекцию, если она была помечена как удаленная
+            local update_bookshelf_sql = [[
+                UPDATE bookshelfs SET is_deleted = 0 WHERE id = ?;
+            ]]
+            local update_stmt = db:prepare(update_bookshelf_sql)
+            if update_stmt then
+                update_stmt:bind1(1, bookshelf_id)
+                update_stmt:step()
+                update_stmt:close()
+            end
+        else
+            -- Создаем новую коллекцию
+            local insert_bookshelf_sql = [[
+                INSERT INTO bookshelfs (name, is_deleted, ts, uuid)
+                VALUES (?, 0, ?, NULL);
+            ]]
+            
+            local insert_stmt = db:prepare(insert_bookshelf_sql)
+            if not insert_stmt then
+                logger.warn("Не удалось подготовить запрос для создания коллекции")
+                success = false
+                break
+            end
+            
+            insert_stmt:bind1(1, collection_name)
+            insert_stmt:bind1(2, current_timestamp)
+            
+            if insert_stmt:step() ~= SQ3.DONE then
+                logger.warn("Ошибка при создании коллекции")
+                success = false
+                break
+            end
+            
+            bookshelf_id = db:rowexec("SELECT last_insert_rowid()")
+            insert_stmt:close()
+            logger.dbg("Создана новая коллекция:", collection_name, "id:", bookshelf_id)
+        end
+        
+        if not bookshelf_id then
+            logger.warn("Не удалось получить ID коллекции")
+            success = false
+            break
+        end
+        
+        -- Обрабатываем каждую книгу в коллекции
+        for _, book_path in ipairs(book_paths) do
+            -- Находим book_id по пути к файлу
+            local find_book_sql = [[
+                SELECT b.id
+                FROM books_impl b
+                JOIN files f ON b.id = f.book_id
+                JOIN folders fo ON f.folder_id = fo.id
+                WHERE f.filename = ? AND fo.name = ?;
+            ]]
+            
+            local filename = book_path:match("/([^/]+)$")
+            local folder = book_path:match("(.+)/[^/]+$")
+            
+            if not filename or not folder then
+                logger.warn("Неверный путь к книге:", book_path)
+                goto continue
+            end
+            
+            -- Добавляем inbox_dir к пути папки для правильного поиска
+            local full_folder = inbox_dir .. "/" .. folder
+            
+            local find_stmt = db:prepare(find_book_sql)
+            if not find_stmt then
+                logger.warn("Не удалось подготовить запрос для поиска книги")
+                goto continue
+            end
+            
+            find_stmt:bind1(1, filename)
+            find_stmt:bind1(2, full_folder)
+            local book_row = find_stmt:step()
+            find_stmt:close()
+            
+            if type(book_row) ~= "table" then
+                logger.dbg("Книга не найдена в базе данных:", book_path)
+                goto continue
+            end
+            
+            local book_id = book_row[1]
+            
+            -- Проверяем существующую связь
+            local check_link_sql = [[
+                SELECT 1 FROM bookshelfs_books 
+                WHERE bookshelfid = ? AND bookid = ?;
+            ]]
+            
+            local check_stmt = db:prepare(check_link_sql)
+            if not check_stmt then
+                logger.warn("Не удалось подготовить запрос для проверки связи")
+                goto continue
+            end
+            
+            check_stmt:bind1(1, bookshelf_id)
+            check_stmt:bind1(2, book_id)
+            local existing_link = check_stmt:step()
+            check_stmt:close()
+            
+            if type(existing_link) == "table" then
+                -- Активируем существующую связь
+                local update_link_sql = [[
+                    UPDATE bookshelfs_books 
+                    SET is_deleted = 0, ts = ?
+                    WHERE bookshelfid = ? AND bookid = ?;
+                ]]
+                local update_link_stmt = db:prepare(update_link_sql)
+                if update_link_stmt then
+                    update_link_stmt:bind1(1, current_timestamp)
+                    update_link_stmt:bind1(2, bookshelf_id)
+                    update_link_stmt:bind1(3, book_id)
+                    update_link_stmt:step()
+                    update_link_stmt:close()
+                end
+            else
+                -- Создаем новую связь
+                local insert_link_sql = [[
+                    INSERT INTO bookshelfs_books (bookshelfid, bookid, ts, is_deleted)
+                    VALUES (?, ?, ?, 0);
+                ]]
+                
+                local insert_link_stmt = db:prepare(insert_link_sql)
+                if not insert_link_stmt then
+                    logger.warn("Не удалось подготовить запрос для создания связи")
+                    goto continue
+                end
+                
+                insert_link_stmt:bind1(1, bookshelf_id)
+                insert_link_stmt:bind1(2, book_id)
+                insert_link_stmt:bind1(3, current_timestamp)
+                
+                if insert_link_stmt:step() ~= SQ3.DONE then
+                    logger.warn("Ошибка при создании связи книги с коллекцией")
+                else
+                    logger.dbg("Добавлена книга в коллекцию:", book_path, "->", collection_name)
+                end
+                insert_link_stmt:close()
+            end
+            
+            ::continue::
+        end
+    end
+    
+    if success then
+        db:exec("COMMIT")
+        db:exec("PRAGMA wal_checkpoint(FULL)")
+        logger.info("Синхронизация коллекций PocketBook завершена успешно")
+    else
+        db:exec("ROLLBACK")
+        logger.warn("Ошибка синхронизации коллекций, выполнен откат")
+    end
+    
+    db:close()
+end
+
+function PocketBookDBHandler:updateBookMetadata(book_data, file_path)
+
+    local read_status_column = G_reader_settings:readSetting("read_name")
+    local read_date_column = G_reader_settings:readSetting("read_date_name")
+    local favorite_column = G_reader_settings:readSetting("favorite_name")
+    
+    if not read_status_column and not read_date_column and not favorite_column then
+        logger.dbg("No sync columns configured for PocketBook")
         return
     end
 
-    -- Local function for safe database closing
-    local closed = false
-    local function safe_db_close()
-        if not closed then
-            db:close()
-            closed = true
-        end
+    local db = SQ3.open(db_path, "rw")
+    if not db then
+        logger.warn("Failed to open PocketBook database")
+        return
     end
     
     db:exec("PRAGMA busy_timeout = 5000;")
     db:exec("BEGIN TRANSACTION")
     
     local success = true
-    local current_timestamp = os.time()
+    local book_id
     
-    -- Store processed collection IDs for subsequent updates
-    local processed_bookshelf_ids = {}
+    -- Find book_id by file path
+    local filename = file_path:match("/([^/]+)$")
+    local folder = file_path:match("(.+)/[^/]+$")
     
-    -- Process each collection
-    for collection_full_name, book_paths in pairs(collections_data.collections) do
-        -- Extract collection name from full name
-        local collection_name =
-            (collection_full_name:match('%["([^"]+)"%]')
-            or collection_full_name:match('«(.-)»')
-            or collection_full_name)
-            :gsub('%s*%b()%s*$', '')
-
-        logger.info("Processing collection: " .. collection_name .. " (full name: " .. collection_full_name .. ")")
-        
-        -- Find or create collection
-        local bookshelf_id = self:findOrCreateBookshelf(db, collection_name, current_timestamp)
-        
-        if bookshelf_id then
-            -- Add ID to processed collections list
-            table.insert(processed_bookshelf_ids, bookshelf_id)
-            
-            -- Process each book in collection
-            for _, book_path in ipairs(book_paths) do
-                local book_id = self:findBookIdByPath(db, book_path)
-                
-                if book_id then
-                    -- Link book to collection if not already linked
-                    self:linkBookToBookshelf(db, bookshelf_id, book_id, current_timestamp)
-                else
-                    logger.info("Book not found by path: " .. book_path)
-                end
-            end
+    if not filename or not folder then
+        logger.warn("Invalid file path:", file_path)
+        db:exec("ROLLBACK")
+        db:close()
+        return
+    end
+    
+    local storage_id = get_storage_id(file_path)
+    
+    local find_book_sql = [[
+        SELECT b.id
+        FROM books_impl b
+        JOIN files f ON b.id = f.book_id
+        JOIN folders fo ON f.folder_id = fo.id
+        WHERE f.filename = ? AND fo.name = ? AND f.storageid = ?;
+    ]]
+    
+    local find_stmt = db:prepare(find_book_sql)
+    if not find_stmt then
+        logger.warn("Failed to prepare book search query")
+        db:exec("ROLLBACK")
+        db:close()
+        return
+    end
+    
+    find_stmt:bind1(1, filename)
+    find_stmt:bind1(2, folder)
+    find_stmt:bind1(3, storage_id)
+    local book_row = find_stmt:step()
+    find_stmt:close()
+    
+    if type(book_row) ~= "table" then
+        logger.warn("Book not found in PocketBook database:", file_path)
+        db:exec("ROLLBACK")
+        db:close()
+        return
+    end
+    
+    book_id = book_row[1]
+    
+    -- Get current profile ID
+    local function GetCurrentProfileId()
+        local profile_name = inkview.GetCurrentProfile()
+        if profile_name == nil then
+            return 1
         else
-            logger.info("Failed to create/find collection: " .. collection_name)
-            success = false
-            break
+            local stmt = db:prepare("SELECT id FROM profiles WHERE name = ?")
+            local profile_id = stmt:reset():bind(ffi.string(profile_name)):step()
+            stmt:close()
+            return profile_id[1]
         end
     end
     
-    -- Force system cache update
-    if success then
-        logger.info("=== Starting forced system cache update ===")
+    local profile_id = GetCurrentProfileId()
+    
+    -- Parse metadata values
+    local is_read = false
+    local is_favorite = false
+    local completed_timestamp = nil
+    
+    if read_status_column and book_data.user_metadata and book_data.user_metadata[read_status_column] then
+        is_read = book_data.user_metadata[read_status_column]["#value#"] == true
+    end
+    
+    if favorite_column and book_data.user_metadata and book_data.user_metadata[favorite_column] then
+        is_favorite = book_data.user_metadata[favorite_column]["#value#"] == true
+    end
+    
+    if read_date_column and book_data.user_metadata and book_data.user_metadata[read_date_column] then
+        local date_value = book_data.user_metadata[read_date_column]["#value#"]
         
-        -- 1. Force update related books to trigger triggers
-        for _, bookshelf_id in ipairs(processed_bookshelf_ids) do
-            local update_books_sql = [[
-                UPDATE books_impl SET updated = ? 
-                WHERE id IN (
-                    SELECT DISTINCT bb.bookid 
-                    FROM bookshelfs_books bb 
-                    WHERE bb.bookshelfid = ? AND bb.is_deleted = 0
-                )
+        if date_value and date_value ~= "" then
+            -- Convert calibre datetime string to unix timestamp
+            local year, month, day, hour, min, sec = date_value:match("(%d+)-(%d+)-(%d+)T(%d+):(%d+):(%d+)")
+            
+            if year and month and day and hour and min and sec then
+                completed_timestamp = os.time({
+                    year = tonumber(year),
+                    month = tonumber(month),
+                    day = tonumber(day),
+                    hour = tonumber(hour),
+                    min = tonumber(min),
+                    sec = tonumber(sec)
+                })
+            end
+        end
+    end
+    
+    -- Check if settings record exists
+    local select_settings_sql = [[
+        SELECT bookid FROM books_settings 
+        WHERE bookid = ? AND profileid = ?;
+    ]]
+    
+    local select_settings_stmt = db:prepare(select_settings_sql)
+    if not select_settings_stmt then
+        logger.warn("Failed to prepare settings check query")
+        success = false
+    else
+        select_settings_stmt:bind1(1, book_id)
+        select_settings_stmt:bind1(2, profile_id)
+        local settings_row = select_settings_stmt:step()
+        select_settings_stmt:close()
+
+        if type(settings_row) == "table" then
+            -- Update existing settings
+            local update_settings_sql = [[
+                UPDATE books_settings 
+                SET completed = ?, favorite = ?, completed_ts = ?
+                WHERE bookid = ? AND profileid = ?;
             ]]
             
-            local update_stmt = db:prepare(update_books_sql)
-            if update_stmt then
-                update_stmt:bind1(1, current_timestamp)
-                update_stmt:bind1(2, bookshelf_id)
+            local update_settings_stmt = db:prepare(update_settings_sql)
+            if not update_settings_stmt then
+                logger.warn("Failed to prepare settings update query")
+                success = false
+            else
+                update_settings_stmt:bind1(1, is_read and 1 or 0)
+                update_settings_stmt:bind1(2, is_favorite and 1 or 0)
+                update_settings_stmt:bind1(3, completed_timestamp or 0)
+                update_settings_stmt:bind1(4, book_id)
+                update_settings_stmt:bind1(5, profile_id)
                 
-                if update_stmt:step() ~= SQ3.DONE then
-                    logger.info("Warning: Failed to update books in collection " .. bookshelf_id)
+                if update_settings_stmt:step() ~= SQ3.DONE then
+                    logger.warn("Error updating PocketBook settings")
+                    success = false
+                else
+                    logger.info("Updated PocketBook settings for book:", filename)
                 end
-                update_stmt:close()
+                update_settings_stmt:close()
+            end
+        else
+            -- Create new settings record
+            local insert_settings_sql = [[
+                INSERT INTO books_settings (bookid, profileid, completed, favorite, completed_ts)
+                VALUES (?, ?, ?, ?, ?);
+            ]]
+            
+            local insert_settings_stmt = db:prepare(insert_settings_sql)
+            if not insert_settings_stmt then
+                logger.warn("Failed to prepare settings insert query")
+                success = false
+            else
+                insert_settings_stmt:bind1(1, book_id)
+                insert_settings_stmt:bind1(2, profile_id)
+                insert_settings_stmt:bind1(3, is_read and 1 or 0)
+                insert_settings_stmt:bind1(4, is_favorite and 1 or 0)
+                insert_settings_stmt:bind1(5, completed_timestamp or 0)
+                
+                if insert_settings_stmt:step() ~= SQ3.DONE then
+                    logger.warn("Error creating PocketBook settings")
+                    success = false
+                else
+                    logger.info("Created PocketBook settings for book:", filename)
+                end
+                insert_settings_stmt:close()
             end
         end
-        
-        -- 2. Update collection timestamps
-        for _, bookshelf_id in ipairs(processed_bookshelf_ids) do
-            local update_bookshelf_sql = "UPDATE bookshelfs SET ts = ? WHERE id = ?"
-            local update_stmt = db:prepare(update_bookshelf_sql)
-            if update_stmt then
-                update_stmt:bind1(1, current_timestamp)
-                update_stmt:bind1(2, bookshelf_id)
-                update_stmt:step()
-                update_stmt:close()
-            end
-        end
-        
-        -- 3. Update timestamps of all book-collection links
-        for _, bookshelf_id in ipairs(processed_bookshelf_ids) do
-            local update_links_sql = "UPDATE bookshelfs_books SET ts = ? WHERE bookshelfid = ? AND is_deleted = 0"
-            local update_stmt = db:prepare(update_links_sql)
-            if update_stmt then
-                update_stmt:bind1(1, current_timestamp)
-                update_stmt:bind1(2, bookshelf_id)
-                update_stmt:step()
-                update_stmt:close()
-            end
-        end
-        
-        logger.info("System cache forcibly updated")
     end
-	
+    
     if success then
         db:exec("COMMIT")
         db:exec("PRAGMA wal_checkpoint(FULL)")
-        logger.info("Collections successfully processed")
+        logger.info("PocketBook metadata update completed successfully")
     else
         db:exec("ROLLBACK")
-        logger.info("Rollback executed during collections processing")
-    end
-
-    safe_db_close()
-    logger.info("=== End of collections processing from SEND_BOOKLISTS ===")
-end
-
--- Helper function to find or create bookshelf
-function PocketBookDBHandler:findOrCreateBookshelf(db, collection_name, current_timestamp)
-    -- Look for existing collection
-    local select_sql = "SELECT id FROM bookshelfs WHERE name = ?"
-    local select_stmt = db:prepare(select_sql)
-    
-    if not select_stmt then
-        logger.info("Error preparing collection search query")
-        return nil
+        logger.warn("PocketBook metadata update failed, rolled back")
     end
     
-    select_stmt:bind1(1, collection_name)
-    local row = select_stmt:step()
-    select_stmt:close()
-    
-    if type(row) == "table" then
-        local bookshelf_id = row[1]
-        
-        -- Update is_deleted = 0 and timestamp for found collection
-        local update_sql = "UPDATE bookshelfs SET is_deleted = 0, ts = ? WHERE id = ?"
-        local update_stmt = db:prepare(update_sql)
-        
-        if update_stmt then
-            update_stmt:bind1(1, current_timestamp)
-            update_stmt:bind1(2, bookshelf_id)
-            update_stmt:step()
-            update_stmt:close()
-        end
-        
-        return bookshelf_id
-    else
-        -- Create new collection
-        local insert_sql = "INSERT INTO bookshelfs (name, is_deleted, ts, uuid) VALUES (?, 0, ?, NULL)"
-        local insert_stmt = db:prepare(insert_sql)
-        
-        if not insert_stmt then
-            logger.info("Error preparing collection creation query")
-            return nil
-        end
-        
-        insert_stmt:bind1(1, collection_name)
-        insert_stmt:bind1(2, current_timestamp)
-        
-        if insert_stmt:step() == SQ3.DONE then
-            local bookshelf_id = db:rowexec("SELECT last_insert_rowid()")
-            insert_stmt:close()
-            return bookshelf_id
-        else
-            insert_stmt:close()
-            logger.info("Error creating collection")
-            return nil
-        end
-    end
-end
-
--- Helper function to find book ID by path
-function PocketBookDBHandler:findBookIdByPath(db, book_path)
-    -- Extract filename from path
-    local filename = book_path:match("/([^/]+)$")
-    if not filename then
-        logger.info("Failed to extract filename from path: " .. book_path)
-        return nil
-    end
-    
-    -- Search for book by filename
-    local sql = [[
-        SELECT f.book_id 
-        FROM files f 
-        WHERE f.filename = ?
-        LIMIT 1
-    ]]
-    
-    local stmt = db:prepare(sql)
-    if not stmt then
-        logger.info("Error preparing book search query")
-        return nil
-    end
-    
-    stmt:bind1(1, filename)
-    local row = stmt:step()
-    stmt:close()
-    
-    if type(row) == "table" then
-        local book_id = row[1]
-        return book_id
-    else
-        return nil
-    end
-end
-
--- Helper function to link book to bookshelf
-function PocketBookDBHandler:linkBookToBookshelf(db, bookshelf_id, book_id, current_timestamp)
-    -- Check for existing link
-    local check_sql = "SELECT 1 FROM bookshelfs_books WHERE bookshelfid = ? AND bookid = ?"
-    local check_stmt = db:prepare(check_sql)
-    
-    if not check_stmt then
-        logger.info("Error preparing link check query")
-        return false
-    end
-    
-    check_stmt:bind1(1, bookshelf_id)
-    check_stmt:bind1(2, book_id)
-    local existing = check_stmt:step()
-    check_stmt:close()
-    
-    if type(existing) == "table" then
-        -- Link already exists, update is_deleted = 0 and timestamp
-        local update_sql = "UPDATE bookshelfs_books SET is_deleted = 0, ts = ? WHERE bookshelfid = ? AND bookid = ?"
-        local update_stmt = db:prepare(update_sql)
-        
-        if update_stmt then
-            update_stmt:bind1(1, current_timestamp)
-            update_stmt:bind1(2, bookshelf_id)
-            update_stmt:bind1(3, book_id)
-            update_stmt:step()
-            update_stmt:close()
-        end
-        return true
-    else
-        -- Create new link
-        local insert_sql = "INSERT INTO bookshelfs_books (bookshelfid, bookid, ts, is_deleted) VALUES (?, ?, ?, 0)"
-        local insert_stmt = db:prepare(insert_sql)
-        
-        if not insert_stmt then
-            logger.info("Error preparing link creation query")
-            return false
-        end
-        
-        insert_stmt:bind1(1, bookshelf_id)
-        insert_stmt:bind1(2, book_id)
-        insert_stmt:bind1(3, current_timestamp)
-        
-        if insert_stmt:step() == SQ3.DONE then
-            insert_stmt:close()
-            return true
-        else
-            insert_stmt:close()
-            logger.info("Error creating book-collection link")
-            return false
-        end
-    end
+    db:close()
 end
 
 return PocketBookDBHandler

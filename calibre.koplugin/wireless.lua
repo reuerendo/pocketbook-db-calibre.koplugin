@@ -553,45 +553,6 @@ function CalibreWireless:setPassword()
     password_dialog:onShowKeyboard()
 end
 
--- function CalibreWireless:setCollectionsLookupName()
-    -- local function lookupNameCheck(name)
-        -- -- Проверяем, начинается ли строка с символа '#'
-        -- if type(name) == "string" and name:sub(1, 1) == "#" then
-            -- return true
-        -- end
-        -- return false
-    -- end
-
-    -- local lookup_name_dialog
-    -- lookup_name_dialog = InputDialog:new{
-        -- title = _("Set Collections Lookup Name"),
-        -- input = G_reader_settings:readSetting("collections_name") or "",
-        -- buttons = {{
-            -- {
-                -- text = _("Cancel"),
-                -- id = "close",
-                -- callback = function()
-                    -- UIManager:close(lookup_name_dialog)
-                -- end,
-            -- },
-            -- {
-                -- text = _("Set Name"),
-                -- callback = function()
-                    -- local name = lookup_name_dialog:getInputText()
-                    -- if lookupNameCheck(name) then
-                        -- G_reader_settings:saveSetting("collections_name", name)
-                    -- else
-                        -- G_reader_settings:delSetting("collections_name")
-                    -- end
-                    -- UIManager:close(lookup_name_dialog)
-                -- end,
-            -- },
-        -- }},
-    -- }
-    -- UIManager:show(lookup_name_dialog)
-    -- lookup_name_dialog:onShowKeyboard()
--- end
-
 function CalibreWireless:setReadLookupName()
     local function lookupNameCheck(name)
         -- Проверяем, начинается ли строка с символа '#'
@@ -755,9 +716,10 @@ function CalibreWireless:getBookCount(arg)
     }
     self:sendJsonData('OK', books)
     
-    -- Отправляем информацию обо всех книгах
+    -- Отправляем полные метаданные книг вместо только book_id
     for index, book in ipairs(CalibreMetadata.books) do
-        local book_id = CalibreMetadata:getBookId(index)
+        -- Получаем полные метаданные книги
+        local book_metadata = CalibreMetadata:getBookMetadata(index)
         
         -- Если включена синхронизация статуса чтения, проверяем метаданные
         if supports_sync and (read_status_column or read_date_column) then
@@ -774,36 +736,31 @@ function CalibreWireless:getBookCount(arg)
                     -- Отмечаем как прочитанную только если статус "complete"
                     if status == "complete" then
                         if read_status_column then
-                            book_id["_is_read_"] = true
-                            book_id["_sync_type_"] = "read"
+                            book_metadata["_is_read_"] = true
+                            book_metadata["_sync_type_"] = "read"
                         end
                         
                         if read_date_column and doc_settings.summary.modified then
-                            book_id["_last_read_date_"] = doc_settings.summary.modified
+                            book_metadata["_last_read_date_"] = doc_settings.summary.modified
                         end
                     end
                 end
             end
-            -- Если файла метаданных нет, книга останется без полей _is_read_ и _last_read_date_
-            -- что означает, что статус чтения не будет изменен в Calibre
         end
         
-        self:sendJsonData('OK', book_id)
+        -- Отправляем полные метаданные книги вместо только ID
+        self:sendJsonData('OK', book_metadata)
     end
     
-    logger.info("Finished sending book data to Calibre")
+    logger.info("Finished sending book metadata to Calibre")
 end
 
 function CalibreWireless:sendBooklists(arg)
-    logger.info("SEND_BOOKLISTS", arg)
+    logger.dbg("SEND_BOOKLISTS", arg)
     
-    -- Process collections for PocketBook if they exist
-    if Device:isPocketBook() and arg.collections then
-        PocketBookDBHandler:processCollections(arg)
-    end
-    
-    -- Process collections for KOReader's built-in collection system
-    if arg.collections then
+-- Process collections for KOReader's built-in collection system
+    -- Only process if there are actual books being sent (count > 0) or non-empty collections
+    if arg.collections and (arg.count > 0 or next(arg.collections) ~= nil) then
         local ReadCollection = require("readcollection")
         local inbox_dir = G_reader_settings:readSetting("inbox_dir")
         
@@ -814,10 +771,29 @@ function CalibreWireless:sendBooklists(arg)
         
         logger.info("Processing collections for KOReader")
         
+        -- Get current collections state for comparison
+        local current_collections = {}
+        for collection_name, collection_data in pairs(ReadCollection.coll) do
+            current_collections[collection_name] = {}
+            for _, item in ipairs(collection_data) do
+                if item.file then
+                    -- Store relative path for comparison
+                    local relative_path = item.file:sub(#inbox_dir + 2) -- Remove inbox_dir + "/"
+                    current_collections[collection_name][relative_path] = true
+                end
+            end
+        end
+        
+        -- Track which books should be in collections after update
+        local new_collections_state = {}
+        
         for collection_full_name, book_paths in pairs(arg.collections) do
             -- Extract collection name by removing column name in parentheses
             local collection_name = collection_full_name:match("^(.-)%s*%(.*%)$") or collection_full_name
             logger.dbg("Processing collection:", collection_name, "from:", collection_full_name)
+            
+            -- Initialize new state for this collection
+            new_collections_state[collection_name] = {}
             
             -- Ensure collection exists
             if not ReadCollection.coll[collection_name] then
@@ -828,6 +804,7 @@ function CalibreWireless:sendBooklists(arg)
             -- Process each book in the collection
             for _, book_path in ipairs(book_paths) do
                 local full_path = inbox_dir .. "/" .. book_path
+                new_collections_state[collection_name][book_path] = true
                 
                 -- Check if file exists
                 if lfs.attributes(full_path, "mode") == "file" then
@@ -840,6 +817,32 @@ function CalibreWireless:sendBooklists(arg)
                     end
                 else
                     logger.warn("Book file not found:", full_path)
+                end
+            end
+        end
+        
+        -- Remove books from collections that are no longer in Calibre collections
+        for collection_name, current_books in pairs(current_collections) do
+            local new_books = new_collections_state[collection_name] or {}
+            
+            for book_path, _ in pairs(current_books) do
+                if not new_books[book_path] then
+                    -- Book should be removed from this collection
+                    local full_path = inbox_dir .. "/" .. book_path
+                    if ReadCollection:isFileInCollection(full_path, collection_name) then
+                        ReadCollection:removeItemFromCollection(full_path, collection_name)
+                        logger.info("Removed from collection", collection_name, ":", book_path)
+                    end
+                end
+            end
+        end
+        
+        -- Remove empty collections that don't exist in Calibre anymore
+        for collection_name, _ in pairs(current_collections) do
+            if not new_collections_state[collection_name] then
+                if ReadCollection.coll[collection_name] and #ReadCollection.coll[collection_name] == 0 then
+                    ReadCollection:removeCollection(collection_name)
+                    logger.dbg("Removed empty collection:", collection_name)
                 end
             end
         end
@@ -977,12 +980,134 @@ end
 
 function CalibreWireless:sendBookMetadata(arg)
     logger.dbg("SEND_BOOK_METADATA", arg)
-
-    CalibreMetadata:updateBook(arg.data)
-
-    if (arg.index + 1) == arg.count then
-        CalibreMetadata:saveBookList()
+    
+    -- Get book metadata from calibre
+    local book_data = arg.data
+    if not book_data or not book_data.lpath then
+        logger.warn("Invalid book data received")
+        return
     end
+    
+    -- Get sync column settings
+    local read_status_column = G_reader_settings:readSetting("read_name")
+    local read_date_column = G_reader_settings:readSetting("read_date_name")
+    local favorite_column = G_reader_settings:readSetting("favorite_name")
+    
+    -- Check if sync is supported
+    local supports_sync = arg.supportsSync
+    if not supports_sync or (not read_status_column and not read_date_column and not favorite_column) then
+        logger.info("Sync not supported or columns not configured")
+        return
+    end
+    
+    -- Get file path
+    local inbox_dir = G_reader_settings:readSetting("inbox_dir")
+    local file_path = inbox_dir .. "/" .. book_data.lpath
+    
+    -- Check if file exists
+    if lfs.attributes(file_path, "mode") ~= "file" then
+        logger.warn("Book file not found:", file_path)
+        return
+    end
+    
+    -- Open document settings
+    local doc_settings = DocSettings:open(file_path)
+    if not doc_settings then
+        logger.warn("Failed to open doc settings for:", file_path)
+        return
+    end
+    
+    local settings_changed = false
+    
+    -- Update read status if the column exists and has a value
+    if read_status_column and book_data.user_metadata and book_data.user_metadata[read_status_column] then
+        local is_read = book_data.user_metadata[read_status_column]["#value#"]
+        local summary = doc_settings:readSetting("summary", {})
+        
+        if is_read then
+            -- Mark as complete if calibre says it's read
+            if summary.status ~= "complete" then
+                logger.info("Marking book as read:", book_data.lpath)
+                summary.status = "complete"
+                settings_changed = true
+            end
+        else
+            -- If calibre says not read, but book was complete, mark as reading
+            if summary.status == "complete" then
+                logger.info("Unmarking book as read:", book_data.lpath)
+                summary.status = "reading"
+                settings_changed = true
+            end
+        end
+        
+        if settings_changed then
+            doc_settings:saveSetting("summary", summary)
+        end
+    end
+    
+    -- Update read date if the column exists and has a value
+    if read_date_column and book_data.user_metadata and book_data.user_metadata[read_date_column] then
+        local read_date = book_data.user_metadata[read_date_column]["#value#"]
+        local summary = doc_settings:readSetting("summary", {})
+        
+        -- Only update if the date is different
+        if summary.modified ~= read_date then
+            logger.info("Updating read date for:", book_data.lpath, "to:", read_date)
+            summary.modified = read_date
+            doc_settings:saveSetting("summary", summary)
+            settings_changed = true
+        end
+    end
+    
+    -- Handle favorite collection synchronization
+    if favorite_column and book_data.user_metadata and book_data.user_metadata[favorite_column] then
+        local is_favorite = book_data.user_metadata[favorite_column]["#value#"]
+        local ReadCollection = require("readcollection")
+        
+        -- Force ReadCollection initialization by calling read() first
+        pcall(ReadCollection.read, ReadCollection)
+        
+        -- Ensure ReadCollection is properly initialized
+        if not ReadCollection.coll then
+            ReadCollection.coll = {}
+            ReadCollection.coll_settings = {}
+        end
+        
+        local default_collection_name = ReadCollection.default_collection_name -- "favorites"
+        
+        -- Ensure the default collection exists
+        if not ReadCollection.coll[default_collection_name] then
+            ReadCollection:addCollection(default_collection_name)
+        end
+        
+        local is_in_favorites = ReadCollection:isFileInCollection(file_path, default_collection_name)
+        
+        if is_favorite and not is_in_favorites then
+            -- Add to favorites collection
+            logger.info("Adding book to favorites:", book_data.lpath)
+            ReadCollection:addItem(file_path, default_collection_name)
+            ReadCollection:write()
+            settings_changed = true
+        elseif not is_favorite and is_in_favorites then
+            -- Remove from favorites collection
+            logger.info("Removing book from favorites:", book_data.lpath)
+            ReadCollection:removeItem(file_path, default_collection_name, true)
+            ReadCollection:write()
+            settings_changed = true
+        end
+    end
+    
+    -- Save changes if any were made
+    if settings_changed then
+        doc_settings:flush()
+        logger.info("Updated reading metadata for:", book_data.lpath)
+    end
+	
+	-- Update PocketBook database if running on PocketBook device
+	if Device:isPocketBook() then
+		PocketBookDBHandler:updateBookMetadata(book_data, file_path)
+	end
+	
 end
 
 function CalibreWireless:deleteBook(arg)
