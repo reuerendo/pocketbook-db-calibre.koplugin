@@ -821,31 +821,31 @@ function CalibreWireless:sendBooklists(arg)
             end
         end
         
-        -- Remove books from collections that are no longer in Calibre collections
-        for collection_name, current_books in pairs(current_collections) do
-            local new_books = new_collections_state[collection_name] or {}
+        -- -- Remove books from collections that are no longer in Calibre collections
+        -- for collection_name, current_books in pairs(current_collections) do
+            -- local new_books = new_collections_state[collection_name] or {}
             
-            for book_path, _ in pairs(current_books) do
-                if not new_books[book_path] then
-                    -- Book should be removed from this collection
-                    local full_path = inbox_dir .. "/" .. book_path
-                    if ReadCollection:isFileInCollection(full_path, collection_name) then
-                        ReadCollection:removeItemFromCollection(full_path, collection_name)
-                        logger.info("Removed from collection", collection_name, ":", book_path)
-                    end
-                end
-            end
-        end
+            -- for book_path, _ in pairs(current_books) do
+                -- if not new_books[book_path] then
+                    -- -- Book should be removed from this collection
+                    -- local full_path = inbox_dir .. "/" .. book_path
+                    -- if ReadCollection:isFileInCollection(full_path, collection_name) then
+                        -- ReadCollection:removeItemFromCollection(full_path, collection_name)
+                        -- logger.info("Removed from collection", collection_name, ":", book_path)
+                    -- end
+                -- end
+            -- end
+        -- end
         
-        -- Remove empty collections that don't exist in Calibre anymore
-        for collection_name, _ in pairs(current_collections) do
-            if not new_collections_state[collection_name] then
-                if ReadCollection.coll[collection_name] and #ReadCollection.coll[collection_name] == 0 then
-                    ReadCollection:removeCollection(collection_name)
-                    logger.dbg("Removed empty collection:", collection_name)
-                end
-            end
-        end
+        -- -- Remove empty collections that don't exist in Calibre anymore
+        -- for collection_name, _ in pairs(current_collections) do
+            -- if not new_collections_state[collection_name] then
+                -- if ReadCollection.coll[collection_name] and #ReadCollection.coll[collection_name] == 0 then
+                    -- ReadCollection:removeCollection(collection_name)
+                    -- logger.dbg("Removed empty collection:", collection_name)
+                -- end
+            -- end
+        -- end
         
         -- Save collections to disk
         ReadCollection:write()
@@ -979,7 +979,7 @@ function CalibreWireless:sendBook(arg)
 end
 
 function CalibreWireless:sendBookMetadata(arg)
-    logger.dbg("SEND_BOOK_METADATA", arg)
+    logger.info("SEND_BOOK_METADATA", arg)
     
     -- Get book metadata from calibre
     local book_data = arg.data
@@ -1059,55 +1059,109 @@ function CalibreWireless:sendBookMetadata(arg)
         end
     end
     
-    -- Handle favorite collection synchronization
-    if favorite_column and book_data.user_metadata and book_data.user_metadata[favorite_column] then
-        local is_favorite = book_data.user_metadata[favorite_column]["#value#"]
-        local ReadCollection = require("readcollection")
-        
-        -- Force ReadCollection initialization by calling read() first
-        pcall(ReadCollection.read, ReadCollection)
-        
-        -- Ensure ReadCollection is properly initialized
-        if not ReadCollection.coll then
-            ReadCollection.coll = {}
-            ReadCollection.coll_settings = {}
+    -- Collection synchronization (excluding favorites)
+    local ReadCollection = require("readcollection")
+    pcall(ReadCollection.read, ReadCollection)
+    
+    if not ReadCollection.coll then
+        ReadCollection.coll = {}
+        ReadCollection.coll_settings = {}
+    end
+    
+    local collection_changes = false
+    local default_collection_name = ReadCollection.default_collection_name
+    
+    -- Step 1: Remove book from ALL existing collections (except favorites)
+    for collection_name, collection_data in pairs(ReadCollection.coll) do
+        if collection_name ~= default_collection_name then -- Skip favorites collection
+            if ReadCollection:isFileInCollection(file_path, collection_name) then
+                logger.info("Removing book from collection during sync:", collection_name, book_data.lpath)
+                ReadCollection:removeItem(file_path, collection_name, true)
+                collection_changes = true
+            end
         end
+    end
+    
+    -- Step 2: Process collections from Calibre metadata  
+    if book_data.user_metadata then
+        for column_name, column_data in pairs(book_data.user_metadata) do
+            -- Skip read status, read date, and favorite columns
+            if column_name ~= read_status_column and 
+               column_name ~= read_date_column and 
+               column_name ~= favorite_column then
+                
+                local collection_values = column_data["#value#"]
+                if collection_values then
+                    -- Handle both single values and arrays
+                    local values_to_process = {}
+                    if type(collection_values) == "table" then
+                        values_to_process = collection_values
+                    else
+                        values_to_process = {collection_values}
+                    end
+                    
+                    -- Step 3: Create/activate collections and add book
+                    for _, collection_value in ipairs(values_to_process) do
+                        if collection_value and tostring(collection_value):match("%S") then
+                            local collection_name = tostring(collection_value)
+                            
+                            -- Create collection if it doesn't exist
+                            if not ReadCollection.coll[collection_name] then
+                                ReadCollection:addCollection(collection_name)
+                                logger.info("Created new collection from metadata:", collection_name)
+                            end
+                            
+                            -- Add book to collection if not already present
+                            if not ReadCollection:isFileInCollection(file_path, collection_name) then
+                                ReadCollection:addItem(file_path, collection_name)
+                                logger.info("Added book to collection from metadata:", collection_name, book_data.lpath)
+                                collection_changes = true
+                            end
+                        end
+                    end
+                end
+            end
+        end
+    end
+    
+    -- Handle favorite collection synchronization (special case)
+    if favorite_column and book_data.user_metadata and book_data.user_metadata[favorite_column] then
+        local calibre_favorite_data = book_data.user_metadata[favorite_column]["#value#"]
         
-        local default_collection_name = ReadCollection.default_collection_name -- "favorites"
-        
-        -- Ensure the default collection exists
         if not ReadCollection.coll[default_collection_name] then
             ReadCollection:addCollection(default_collection_name)
         end
         
-        local is_in_favorites = ReadCollection:isFileInCollection(file_path, default_collection_name)
+        local is_in_koreader_favorites = ReadCollection:isFileInCollection(file_path, default_collection_name)
+        local is_calibre_favorite = (calibre_favorite_data == true)
         
-        if is_favorite and not is_in_favorites then
-            -- Add to favorites collection
-            logger.info("Adding book to favorites:", book_data.lpath)
+        if is_calibre_favorite and not is_in_koreader_favorites then
+            logger.info("Syncing: Adding book to KOReader favorites from Calibre:", book_data.lpath)
             ReadCollection:addItem(file_path, default_collection_name)
-            ReadCollection:write()
-            settings_changed = true
-        elseif not is_favorite and is_in_favorites then
-            -- Remove from favorites collection
-            logger.info("Removing book from favorites:", book_data.lpath)
+            collection_changes = true
+        elseif not is_calibre_favorite and is_in_koreader_favorites then
+            logger.info("Syncing: Removing book from KOReader favorites per Calibre:", book_data.lpath)
             ReadCollection:removeItem(file_path, default_collection_name, true)
-            ReadCollection:write()
-            settings_changed = true
+            collection_changes = true
         end
     end
     
-    -- Save changes if any were made
+    -- Save collection changes if any were made
+    if collection_changes then
+        ReadCollection:write()
+        logger.info("Updated collections for:", book_data.lpath)
+    end
+    
+    -- Save document settings changes if any were made
     if settings_changed then
         doc_settings:flush()
         logger.info("Updated reading metadata for:", book_data.lpath)
     end
-	
-	-- Update PocketBook database if running on PocketBook device
-	if Device:isPocketBook() then
-		PocketBookDBHandler:updateBookMetadata(book_data, file_path)
-	end
-	
+    
+    -- Update PocketBook database if running on PocketBook device
+    if Device:isPocketBook() then
+        PocketBookDBHandler:updateBookMetadata(book_data, file_path)
+    end
 end
 
 function CalibreWireless:deleteBook(arg)

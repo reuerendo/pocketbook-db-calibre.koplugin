@@ -455,130 +455,140 @@ function PocketBookDBHandler:saveBookToDatabase(arg, filename)
 		end
 	end
 
-    if success then
-        -- Check for tags in metadata
-        local function GetCurrentProfileId()
-            local profile_name = inkview.GetCurrentProfile()
-            if profile_name == nil then
-                return 1
-            else
-                local stmt = db:prepare("SELECT id FROM profiles WHERE name = ?")
-                local profile_id = stmt:reset():bind(ffi.string(profile_name)):step()
-                stmt:close()
-                return profile_id[1]
-            end
-        end
-        
-        local profile_id = GetCurrentProfileId()
-        
-        local has_read = arg.metadata.user_metadata 
-            and arg.metadata.user_metadata[read_lookup_name] 
-            and arg.metadata.user_metadata[read_lookup_name]["#value#"] == true
+	if success then
+		-- Check for tags in metadata
+		local function GetCurrentProfileId()
+			local profile_name = inkview.GetCurrentProfile()
+			if profile_name == nil then
+				return 1
+			else
+				local stmt = db:prepare("SELECT id FROM profiles WHERE name = ?")
+				local profile_id = stmt:reset():bind(ffi.string(profile_name)):step()
+				stmt:close()
+				return profile_id[1]
+			end
+		end
+		
+		local profile_id = GetCurrentProfileId()
+		
+		local has_read = arg.metadata.user_metadata 
+			and arg.metadata.user_metadata[read_lookup_name] 
+			and arg.metadata.user_metadata[read_lookup_name]["#value#"] == true
 
-        local has_favorite = arg.metadata.user_metadata 
-            and arg.metadata.user_metadata[favorite_lookup_name] 
-            and arg.metadata.user_metadata[favorite_lookup_name]["#value#"] == true
+		local has_favorite = arg.metadata.user_metadata 
+			and arg.metadata.user_metadata[favorite_lookup_name] 
+			and arg.metadata.user_metadata[favorite_lookup_name]["#value#"] == true
 
-        -- Get read date if available
-        local completed_date = nil
-        if has_read and arg.metadata.user_metadata and arg.metadata.user_metadata[read_date_lookup_name] then
-            local date_value = arg.metadata.user_metadata[read_date_lookup_name]["#value#"]
-            
-            if date_value and date_value ~= "" then
-                -- Convert calibre datetime string to YYYY-MM-DD format
-                local year, month, day, hour, min, sec = date_value:match("(%d+)-(%d+)-(%d+)T(%d+):(%d+):(%d+)")
-                
-                if year and month and day and hour and min and sec then
-                    -- Convert UTC to local time
-                    local utc_time = os.time({
-                        year = tonumber(year),
-                        month = tonumber(month),
-                        day = tonumber(day),
-                        hour = tonumber(hour),
-                        min = tonumber(min),
-                        sec = tonumber(sec)
-                    })
-                    
-                    -- Get local time
-                    local local_time = os.date("*t", utc_time)
-                    
-                    completed_date = string.format("%04d-%02d-%02d", 
-                        local_time.year, local_time.month, local_time.day)
-                end
-            end
-        end
-        
-        -- Process read/favorite status in database
-        if has_read or has_favorite then
-            local completed = has_read and 1 or 0
-            local favorite = has_favorite and 1 or 0
-            
-            local select_settings_sql = [[
-                SELECT bookid FROM books_settings 
-                WHERE bookid = ? AND profileid = ?;
-            ]]
-            
-            local select_settings_stmt = db:prepare(select_settings_sql)
-            if not select_settings_stmt then
-                logger.info("Error: Failed to prepare settings check query")
-                success = false
-            else
-                select_settings_stmt:bind1(1, book_id)
-                select_settings_stmt:bind1(2, profile_id)
-                local settings_row = select_settings_stmt:step()
-                select_settings_stmt:close()
+		-- Get read date if available
+		local completed_date = nil
+		if has_read and arg.metadata.user_metadata and arg.metadata.user_metadata[read_date_lookup_name] then
+			local date_value = arg.metadata.user_metadata[read_date_lookup_name]["#value#"]
+			
+			if date_value and date_value ~= "" then
+				-- Convert calibre datetime string to YYYY-MM-DD format
+				local year, month, day, hour, min, sec = date_value:match("(%d+)-(%d+)-(%d+)T(%d+):(%d+):(%d+)")
+				
+				if year and month and day and hour and min and sec then
+					-- Convert UTC to local time
+					local utc_time = os.time({
+						year = tonumber(year),
+						month = tonumber(month),
+						day = tonumber(day),
+						hour = tonumber(hour),
+						min = tonumber(min),
+						sec = tonumber(sec)
+					})
+					
+					-- Get local time
+					local local_time = os.date("*t", utc_time)
+					
+					completed_date = string.format("%04d-%02d-%02d", 
+						local_time.year, local_time.month, local_time.day)
+				end
+			end
+		end
+		
+		-- Process read/favorite status in database
+		if has_read or has_favorite then
+			local completed = has_read and 1 or 0
+			local favorite = has_favorite and 1 or 0
+			local cpage_value = has_read and 100 or nil  -- 100 только если прочитана, иначе NULL
+			local npage_value = has_read and 100 or nil  -- 100 только если прочитана, иначе NULL
+			
+			local select_settings_sql = [[
+				SELECT bookid FROM books_settings 
+				WHERE bookid = ? AND profileid = ?;
+			]]
+			
+			local select_settings_stmt = db:prepare(select_settings_sql)
+			if not select_settings_stmt then
+				logger.info("Error: Failed to prepare settings check query")
+				success = false
+			else
+				select_settings_stmt:bind1(1, book_id)
+				select_settings_stmt:bind1(2, profile_id)
+				local settings_row = select_settings_stmt:step()
+				select_settings_stmt:close()
 
-                if type(settings_row) == "table" then
-                    -- Update existing settings
-                    local update_settings_sql = [[
-                        UPDATE books_settings 
-                        SET completed = ?, favorite = ?
-                        WHERE bookid = ? AND profileid = ?;
-                    ]]
-                    
-                    local update_settings_stmt = db:prepare(update_settings_sql)
-                    if not update_settings_stmt then
-                        logger.info("Error: Failed to prepare settings update query")
-                        success = false
-                    else
-                        update_settings_stmt:bind1(1, completed)
-                        update_settings_stmt:bind1(2, favorite)
-                        update_settings_stmt:bind1(3, book_id)
-                        update_settings_stmt:bind1(4, profile_id)
-                        
-                        if update_settings_stmt:step() ~= SQ3.DONE then
-                            logger.info("Error updating settings")
-                            success = false
-                        end
-                        update_settings_stmt:close()
-                    end
-                else
-                    -- Create new settings record
-                    local insert_settings_sql = [[
-                        INSERT INTO books_settings (bookid, profileid, completed, favorite)
-                        VALUES (?, ?, ?, ?);
-                    ]]
-                    
-                    local insert_settings_stmt = db:prepare(insert_settings_sql)
-                    if not insert_settings_stmt then
-                        logger.info("Error: Failed to prepare settings insert query")
-                        success = false
-                    else
-                        insert_settings_stmt:bind1(1, book_id)
-                        insert_settings_stmt:bind1(2, profile_id)
-                        insert_settings_stmt:bind1(3, completed)
-                        insert_settings_stmt:bind1(4, favorite)
-                        
-                        if insert_settings_stmt:step() ~= SQ3.DONE then
-                            logger.info("Error creating settings")
-                            success = false
-                        end
-                        insert_settings_stmt:close()
-                    end
-                end
-            end
-        end
-    end
+				if type(settings_row) == "table" then
+					-- Update existing settings
+			local cpage_value = is_read and 100 or nil
+			local npage_value = is_read and 100 or nil
+					local update_settings_sql = [[
+						UPDATE books_settings 
+						SET completed = ?, favorite = ?, cpage = ?, npage = ?
+						WHERE bookid = ? AND profileid = ?;
+					]]
+					
+					local update_settings_stmt = db:prepare(update_settings_sql)
+					if not update_settings_stmt then
+						logger.info("Error: Failed to prepare settings update query")
+						success = false
+					else
+						update_settings_stmt:bind1(1, completed)
+						update_settings_stmt:bind1(2, favorite)
+						update_settings_stmt:bind1(3, cpage_value)
+						update_settings_stmt:bind1(4, npage_value)
+						update_settings_stmt:bind1(5, book_id)
+						update_settings_stmt:bind1(6, profile_id)
+						
+						if update_settings_stmt:step() ~= SQ3.DONE then
+							logger.info("Error updating settings")
+							success = false
+						end
+						update_settings_stmt:close()
+					end
+				else
+					-- Create new settings record
+			local cpage_value = is_read and 100 or nil
+			local npage_value = is_read and 100 or nil
+					local insert_settings_sql = [[
+						INSERT INTO books_settings (bookid, profileid, completed, favorite, cpage, npage)
+						VALUES (?, ?, ?, ?, ?, ?);
+					]]
+					
+					local insert_settings_stmt = db:prepare(insert_settings_sql)
+					if not insert_settings_stmt then
+						logger.info("Error: Failed to prepare settings insert query")
+						success = false
+					else
+						insert_settings_stmt:bind1(1, book_id)
+						insert_settings_stmt:bind1(2, profile_id)
+						insert_settings_stmt:bind1(3, completed)
+						insert_settings_stmt:bind1(4, favorite)
+						insert_settings_stmt:bind1(5, cpage_value)
+						insert_settings_stmt:bind1(6, npage_value)
+						
+						if insert_settings_stmt:step() ~= SQ3.DONE then
+							logger.info("Error creating settings")
+							success = false
+						end
+						insert_settings_stmt:close()
+					end
+				end
+			end
+		end
+	end
 
     if success then
         db:exec("COMMIT")
@@ -795,8 +805,9 @@ function PocketBookDBHandler:updateBookMetadata(book_data, file_path)
     local read_status_column = G_reader_settings:readSetting("read_name")
     local read_date_column = G_reader_settings:readSetting("read_date_name")
     local favorite_column = G_reader_settings:readSetting("favorite_name")
+    local collections_column = G_reader_settings:readSetting("collections_name")
     
-    if not read_status_column and not read_date_column and not favorite_column then
+    if not read_status_column and not read_date_column and not favorite_column and not collections_column then
         logger.dbg("No sync columns configured for PocketBook")
         return
     end
@@ -807,7 +818,7 @@ function PocketBookDBHandler:updateBookMetadata(book_data, file_path)
         return
     end
     
-    db:exec("PRAGMA busy_timeout = 5000;")
+    db:exec("PRAGMA busy_timeout = 10000;")
     db:exec("BEGIN TRANSACTION")
     
     local success = true
@@ -923,9 +934,12 @@ function PocketBookDBHandler:updateBookMetadata(book_data, file_path)
 
         if type(settings_row) == "table" then
             -- Update existing settings
+            local cpage_value = is_read and 100 or 0
+            local npage_value = is_read and 100 or 0
+            
             local update_settings_sql = [[
                 UPDATE books_settings 
-                SET completed = ?, favorite = ?, completed_ts = ?
+                SET completed = ?, favorite = ?, completed_ts = ?, cpage = ?, npage = ?
                 WHERE bookid = ? AND profileid = ?;
             ]]
             
@@ -937,8 +951,10 @@ function PocketBookDBHandler:updateBookMetadata(book_data, file_path)
                 update_settings_stmt:bind1(1, is_read and 1 or 0)
                 update_settings_stmt:bind1(2, is_favorite and 1 or 0)
                 update_settings_stmt:bind1(3, completed_timestamp or 0)
-                update_settings_stmt:bind1(4, book_id)
-                update_settings_stmt:bind1(5, profile_id)
+                update_settings_stmt:bind1(4, cpage_value)
+                update_settings_stmt:bind1(5, npage_value)
+                update_settings_stmt:bind1(6, book_id)
+                update_settings_stmt:bind1(7, profile_id)
                 
                 if update_settings_stmt:step() ~= SQ3.DONE then
                     logger.warn("Error updating PocketBook settings")
@@ -950,9 +966,12 @@ function PocketBookDBHandler:updateBookMetadata(book_data, file_path)
             end
         else
             -- Create new settings record
+            local cpage_value = is_read and 100 or 0
+            local npage_value = is_read and 100 or 0
+            
             local insert_settings_sql = [[
-                INSERT INTO books_settings (bookid, profileid, completed, favorite, completed_ts)
-                VALUES (?, ?, ?, ?, ?);
+                INSERT INTO books_settings (bookid, profileid, completed, favorite, completed_ts, cpage, npage)
+                VALUES (?, ?, ?, ?, ?, ?, ?);
             ]]
             
             local insert_settings_stmt = db:prepare(insert_settings_sql)
@@ -965,6 +984,8 @@ function PocketBookDBHandler:updateBookMetadata(book_data, file_path)
                 insert_settings_stmt:bind1(3, is_read and 1 or 0)
                 insert_settings_stmt:bind1(4, is_favorite and 1 or 0)
                 insert_settings_stmt:bind1(5, completed_timestamp or 0)
+                insert_settings_stmt:bind1(6, cpage_value)
+                insert_settings_stmt:bind1(7, npage_value)
                 
                 if insert_settings_stmt:step() ~= SQ3.DONE then
                     logger.warn("Error creating PocketBook settings")
@@ -973,6 +994,154 @@ function PocketBookDBHandler:updateBookMetadata(book_data, file_path)
                     logger.info("Created PocketBook settings for book:", filename)
                 end
                 insert_settings_stmt:close()
+            end
+        end
+    end
+    
+    -- Process collections if the column is configured and data exists
+    if success and collections_column and book_data.user_metadata and book_data.user_metadata[collections_column] then
+        local collections_data = book_data.user_metadata[collections_column]["#value#"]
+        
+        if collections_data and type(collections_data) == "table" then
+            logger.info("Processing collections for book:", filename)
+            
+            -- First, remove book from all existing collections
+            local remove_from_collections_sql = [[
+                UPDATE bookshelfs_books 
+                SET is_deleted = 1 
+                WHERE bookid = ?;
+            ]]
+            
+            local remove_stmt = db:prepare(remove_from_collections_sql)
+            if remove_stmt then
+                remove_stmt:bind1(1, book_id)
+                remove_stmt:step()
+                remove_stmt:close()
+                logger.dbg("Removed book from all existing collections")
+            end
+            
+            -- Add book to specified collections
+            for _, collection_name in ipairs(collections_data) do
+                logger.info("Processing collection for book:", collection_name)
+                
+                -- Check if collection exists
+                local select_bookshelf_sql = [[
+                    SELECT id FROM bookshelfs 
+                    WHERE name = ?;
+                ]]
+                
+                local select_bookshelf_stmt = db:prepare(select_bookshelf_sql)
+                if not select_bookshelf_stmt then
+                    logger.warn("Failed to prepare collection check query")
+                    success = false
+                    break
+                end
+                
+                select_bookshelf_stmt:bind1(1, collection_name)
+                local bookshelf_row = select_bookshelf_stmt:step()
+                select_bookshelf_stmt:close()
+                
+                local bookshelf_id
+                if type(bookshelf_row) == "table" then
+                    bookshelf_id = bookshelf_row[1]
+                    logger.dbg("Found existing collection, id:", bookshelf_id)
+                    
+                    -- Activate collection if it was marked as deleted
+                    local update_sql = [[
+                        UPDATE bookshelfs 
+                        SET is_deleted = 0 
+                        WHERE id = ?;
+                    ]]
+                    
+                    local update_stmt = db:prepare(update_sql)
+                    if update_stmt then
+                        update_stmt:bind1(1, bookshelf_id)
+                        update_stmt:step()
+                        update_stmt:close()
+                    end
+                else
+                    -- Create new collection
+                    logger.info("Creating new collection:", collection_name)
+                    local insert_bookshelf_sql = [[
+                        INSERT INTO bookshelfs (name, is_deleted, ts, uuid)
+                        VALUES (?, 0, ?, NULL);
+                    ]]
+                    
+                    local insert_bookshelf_stmt = db:prepare(insert_bookshelf_sql)
+                    if not insert_bookshelf_stmt then
+                        logger.warn("Failed to prepare collection insert query")
+                        success = false
+                        break
+                    end
+                    
+                    insert_bookshelf_stmt:bind1(1, collection_name)
+                    insert_bookshelf_stmt:bind1(2, current_timestamp)
+                    
+                    if insert_bookshelf_stmt:step() ~= SQ3.DONE then
+                        logger.warn("Error creating collection")
+                        success = false
+                        break
+                    end
+                    
+                    bookshelf_id = db:rowexec("SELECT last_insert_rowid()")
+                    insert_bookshelf_stmt:close()
+                    logger.info("Created new collection, id:", bookshelf_id)
+                end
+                
+                if bookshelf_id then
+                    -- Check existing link
+                    local check_link_sql = [[
+                        SELECT 1 FROM bookshelfs_books 
+                        WHERE bookshelfid = ? AND bookid = ?;
+                    ]]
+                    
+                    local check_link_stmt = db:prepare(check_link_sql)
+                    if check_link_stmt then
+                        check_link_stmt:bind1(1, bookshelf_id)
+                        check_link_stmt:bind1(2, book_id)
+                        local existing_link = check_link_stmt:step()
+                        check_link_stmt:close()
+                        
+                        if type(existing_link) == "table" then
+                            -- Reactivate existing link
+                            local update_link_sql = [[
+                                UPDATE bookshelfs_books 
+                                SET is_deleted = 0, ts = ?
+                                WHERE bookshelfid = ? AND bookid = ?;
+                            ]]
+                            local update_link_stmt = db:prepare(update_link_sql)
+                            if update_link_stmt then
+                                update_link_stmt:bind1(1, current_timestamp)
+                                update_link_stmt:bind1(2, bookshelf_id)
+                                update_link_stmt:bind1(3, book_id)
+                                update_link_stmt:step()
+                                update_link_stmt:close()
+                                logger.dbg("Reactivated book-collection link")
+                            end
+                        else
+                            -- Create new link
+                            local insert_link_sql = [[
+                                INSERT INTO bookshelfs_books (bookshelfid, bookid, ts, is_deleted)
+                                VALUES (?, ?, ?, 0);
+                            ]]
+                            
+                            local insert_link_stmt = db:prepare(insert_link_sql)
+                            if insert_link_stmt then
+                                insert_link_stmt:bind1(1, bookshelf_id)
+                                insert_link_stmt:bind1(2, book_id)
+                                insert_link_stmt:bind1(3, current_timestamp)
+                                
+                                if insert_link_stmt:step() ~= SQ3.DONE then
+                                    logger.warn("Error creating book-collection link")
+                                    success = false
+                                else
+                                    logger.dbg("Created new book-collection link")
+                                end
+                                insert_link_stmt:close()
+                            end
+                        end
+                    end
+                end
             end
         end
     end
