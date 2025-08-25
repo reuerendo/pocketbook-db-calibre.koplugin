@@ -265,7 +265,7 @@ function CalibreWireless:connect()
         ok = true
     else
         logger.info("calibre: searching for a server")
-        Trapper:info(_("Searching for a calibre server… (tap to cancel)"))
+        Trapper:info(_("Searching for a calibre serverâ€¦ (tap to cancel)"))
         ok, host, port = Trapper:dismissableRunInSubprocess(find_calibre_server)
         if not ok then
             -- Canceled.
@@ -342,7 +342,7 @@ function CalibreWireless:connect()
 
     logger.info("calibre: connected")
 
-    -- Heartbeat monitoring…
+    -- Heartbeat monitoringâ€¦
     while ok and not self.disconnected_by_server do
         ok = resume_in(5 * 60)
     end
@@ -556,7 +556,7 @@ end
 
 function CalibreWireless:setReadLookupName()
     local function lookupNameCheck(name)
-        -- Проверяем, начинается ли строка с символа '#'
+        -- ÐŸÑ€Ð¾Ð²ÐµÑ€ÑÐµÐ¼, Ð½Ð°Ñ‡Ð¸Ð½Ð°ÐµÑ‚ÑÑ Ð»Ð¸ ÑÑ‚Ñ€Ð¾ÐºÐ° Ñ ÑÐ¸Ð¼Ð²Ð¾Ð»Ð° '#'
         if type(name) == "string" and name:sub(1, 1) == "#" then
             return true
         end
@@ -595,7 +595,7 @@ end
 
 function CalibreWireless:setReadDateLookupName()
     local function lookupNameCheck(name)
-        -- Проверяем, начинается ли строка с символа '#'
+        -- ÐŸÑ€Ð¾Ð²ÐµÑ€ÑÐµÐ¼, Ð½Ð°Ñ‡Ð¸Ð½Ð°ÐµÑ‚ÑÑ Ð»Ð¸ ÑÑ‚Ñ€Ð¾ÐºÐ° Ñ ÑÐ¸Ð¼Ð²Ð¾Ð»Ð° '#'
         if type(name) == "string" and name:sub(1, 1) == "#" then
             return true
         end
@@ -634,7 +634,7 @@ end
 
 function CalibreWireless:setFavoriteLookupName()
     local function lookupNameCheck(name)
-        -- Проверяем, начинается ли строка с символа '#'
+        -- ÐŸÑ€Ð¾Ð²ÐµÑ€ÑÐµÐ¼, Ð½Ð°Ñ‡Ð¸Ð½Ð°ÐµÑ‚ÑÑ Ð»Ð¸ ÑÑ‚Ñ€Ð¾ÐºÐ° Ñ ÑÐ¸Ð¼Ð²Ð¾Ð»Ð° '#'
         if type(name) == "string" and name:sub(1, 1) == "#" then
             return true
         end
@@ -717,12 +717,11 @@ function CalibreWireless:getBookCount(arg)
     }
     self:sendJsonData('OK', books)
     
-    -- Send book data based on whether caching is enabled
     for index, book in ipairs(CalibreMetadata.books) do
         local book_data
+        local sync_data = {}
         
         if arg.willUseCachedMetadata then
-            -- When caching is enabled, send minimal data with priKey
             book_data = {
                 priKey = index,
                 uuid = book.uuid,
@@ -731,11 +730,9 @@ function CalibreWireless:getBookCount(arg)
                 extension = book.extension or ""
             }
         else
-            -- When caching is disabled, send full metadata
             book_data = CalibreMetadata:getBookMetadata(index)
         end
         
-        -- Add sync information if supported
         if supports_sync and (read_status_column or read_date_column) then
             local file_path = G_reader_settings:readSetting("inbox_dir") .. "/" .. book.lpath
             local sdr_dir = DocSettings:getSidecarDir(file_path)
@@ -749,21 +746,33 @@ function CalibreWireless:getBookCount(arg)
                     if status == "complete" then
                         if read_status_column then
                             book_data["_is_read_"] = true
-                            book_data["_sync_type_"] = "read"
+                            sync_data["_is_read_"] = true
                         end
                         
                         if read_date_column and doc_settings.summary.modified then
                             book_data["_last_read_date_"] = doc_settings.summary.modified
+                            sync_data["_last_read_date_"] = doc_settings.summary.modified
+                        end
+                    else
+                        if read_status_column then
+                            book_data["_is_read_"] = false
+                            sync_data["_is_read_"] = false
                         end
                     end
                 end
             end
         end
         
+        if next(sync_data) then
+            CalibreMetadata:updateBookSyncData(book.lpath, sync_data)
+        end
+        
         self:sendJsonData('OK', book_data)
     end
     
-    logger.info("Finished sending book data to Calibre")
+    CalibreMetadata:saveBookList()
+    
+    logger.info("Finished sending book data to Calibre, caching:", arg.willUseCachedMetadata or false)
 end
 
 function CalibreWireless:sendBooklists(arg)
@@ -1025,38 +1034,42 @@ function CalibreWireless:sendBook(arg)
 end
 
 function CalibreWireless:sendBookMetadata(arg)
-    logger.info("SEND_BOOK_METADATA", arg)
+    logger.dbg("SEND_BOOK_METADATA", arg)
     
-    -- Get book metadata from calibre
+    CalibreMetadata:updateBook(arg.data)
+
+    if (arg.index + 1) == arg.count then
+        CalibreMetadata:saveBookList()
+        logger.info("Saved book metadata to file after batch completion")
+    end
+    
     local book_data = arg.data
     if not book_data or not book_data.lpath then
         logger.warn("Invalid book data received")
         return
     end
     
-    -- Get sync column settings
     local read_status_column = G_reader_settings:readSetting("read_name")
     local read_date_column = G_reader_settings:readSetting("read_date_name")
     local favorite_column = G_reader_settings:readSetting("favorite_name")
     
-    -- Check if sync is supported
     local supports_sync = arg.supportsSync
     if not supports_sync or (not read_status_column and not read_date_column and not favorite_column) then
         logger.info("Sync not supported or columns not configured")
         return
     end
     
-    -- Get file path
     local inbox_dir = G_reader_settings:readSetting("inbox_dir")
     local file_path = inbox_dir .. "/" .. book_data.lpath
     
-    -- Check if file exists
     if lfs.attributes(file_path, "mode") ~= "file" then
         logger.warn("Book file not found:", file_path)
         return
     end
     
-    -- Open document settings
+    local sync_data = {}
+    local metadata_updated = false
+    
     local doc_settings = DocSettings:open(file_path)
     if not doc_settings then
         logger.warn("Failed to open doc settings for:", file_path)
@@ -1065,47 +1078,46 @@ function CalibreWireless:sendBookMetadata(arg)
     
     local settings_changed = false
     
-    -- Update read status if the column exists and has a value
+    -- Simplified sync logic - just sync the values without complex logic
     if read_status_column and book_data.user_metadata and book_data.user_metadata[read_status_column] then
-        local is_read = book_data.user_metadata[read_status_column]["#value#"]
+        local calibre_is_read = book_data.user_metadata[read_status_column]["#value#"]
         local summary = doc_settings:readSetting("summary", {})
+        local device_is_read = (summary.status == "complete")
         
-        if is_read then
-            -- Mark as complete if calibre says it's read
+        -- Apply calibre value to device if different
+        if calibre_is_read then
             if summary.status ~= "complete" then
-                logger.info("Marking book as read:", book_data.lpath)
                 summary.status = "complete"
                 settings_changed = true
             end
         else
-            -- If calibre says not read, but book was complete, mark as reading
             if summary.status == "complete" then
-                logger.info("Unmarking book as read:", book_data.lpath)
-                summary.status = "reading"
+                summary.status = "reading"  
                 settings_changed = true
             end
         end
-        
-        if settings_changed then
-            doc_settings:saveSetting("summary", summary)
-        end
+        sync_data["_is_read_"] = calibre_is_read
     end
     
-    -- Update read date if the column exists and has a value
     if read_date_column and book_data.user_metadata and book_data.user_metadata[read_date_column] then
-        local read_date = book_data.user_metadata[read_date_column]["#value#"]
+        local calibre_read_date = book_data.user_metadata[read_date_column]["#value#"]
         local summary = doc_settings:readSetting("summary", {})
         
-        -- Only update if the date is different
-        if summary.modified ~= read_date then
-            logger.info("Updating read date for:", book_data.lpath, "to:", read_date)
-            summary.modified = read_date
-            doc_settings:saveSetting("summary", summary)
+        -- Apply calibre value
+        if calibre_read_date and summary.modified ~= calibre_read_date then
+            summary.modified = calibre_read_date
             settings_changed = true
         end
+        sync_data["_last_read_date_"] = calibre_read_date
     end
     
-    -- Handle ONLY favorite collection synchronization
+    if next(sync_data) then
+        CalibreMetadata:updateBookSyncData(book_data.lpath, sync_data)
+        metadata_updated = true
+        logger.info("Updated sync data in CalibreMetadata for:", book_data.lpath)
+    end
+    
+    -- Handle favorites sync (unchanged from original)
     if favorite_column and book_data.user_metadata and book_data.user_metadata[favorite_column] then
         pcall(ReadCollection.read, ReadCollection)
         
@@ -1135,20 +1147,23 @@ function CalibreWireless:sendBookMetadata(arg)
             collection_changes = true
         end
         
-        -- Save collection changes if any were made
         if collection_changes then
             ReadCollection:write()
             logger.info("Updated favorites for:", book_data.lpath)
         end
     end
     
-    -- Save document settings changes if any were made
     if settings_changed then
+        doc_settings:saveSetting("summary", summary)
         doc_settings:flush()
         logger.info("Updated reading metadata for:", book_data.lpath)
     end
     
-    -- Update PocketBook database if running on PocketBook device
+    if metadata_updated then
+        CalibreMetadata:saveBookList()
+        logger.info("Force saved CalibreMetadata after sync data update")
+    end
+    
     if Device:isPocketBook() then
         PocketBookDBHandler:updateBookMetadata(book_data, file_path)
     end
