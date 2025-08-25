@@ -717,149 +717,54 @@ function CalibreWireless:getBookCount(arg)
     }
     self:sendJsonData('OK', books)
     
-    -- Отправляем полные метаданные книг вместо только book_id
+    -- Send book data based on whether caching is enabled
     for index, book in ipairs(CalibreMetadata.books) do
-        -- Получаем полные метаданные книги
-        local book_metadata = CalibreMetadata:getBookMetadata(index)
+        local book_data
         
-        -- Если включена синхронизация статуса чтения, проверяем метаданные
+        if arg.willUseCachedMetadata then
+            -- When caching is enabled, send minimal data with priKey
+            book_data = {
+                priKey = index,
+                uuid = book.uuid,
+                lpath = book.lpath,
+                last_modified = book.last_modified,
+                extension = book.extension or ""
+            }
+        else
+            -- When caching is disabled, send full metadata
+            book_data = CalibreMetadata:getBookMetadata(index)
+        end
+        
+        -- Add sync information if supported
         if supports_sync and (read_status_column or read_date_column) then
             local file_path = G_reader_settings:readSetting("inbox_dir") .. "/" .. book.lpath
             local sdr_dir = DocSettings:getSidecarDir(file_path)
             local metadata_file = sdr_dir .. "/metadata." .. util.getFileNameSuffix(file_path) .. ".lua"
             
-            -- Проверяем, существует ли файл метаданных
             if lfs.attributes(metadata_file, "mode") == "file" then
                 local ok, doc_settings = pcall(dofile, metadata_file)
                 if ok and doc_settings and doc_settings.summary then
                     local status = doc_settings.summary.status
                     
-                    -- Отмечаем как прочитанную только если статус "complete"
                     if status == "complete" then
                         if read_status_column then
-                            book_metadata["_is_read_"] = true
-                            book_metadata["_sync_type_"] = "read"
+                            book_data["_is_read_"] = true
+                            book_data["_sync_type_"] = "read"
                         end
                         
                         if read_date_column and doc_settings.summary.modified then
-                            book_metadata["_last_read_date_"] = doc_settings.summary.modified
+                            book_data["_last_read_date_"] = doc_settings.summary.modified
                         end
                     end
                 end
             end
         end
         
-        -- Отправляем полные метаданные книги вместо только ID
-        self:sendJsonData('OK', book_metadata)
+        self:sendJsonData('OK', book_data)
     end
     
-    logger.info("Finished sending book metadata to Calibre")
+    logger.info("Finished sending book data to Calibre")
 end
-
--- function CalibreWireless:sendBooklists(arg)
-    -- logger.dbg("SEND_BOOKLISTS", arg)
-    
-    -- if arg.collections and (arg.count > 0 or next(arg.collections) ~= nil) then
-        -- local inbox_dir = G_reader_settings:readSetting("inbox_dir")
-        
-        -- -- Load ReadCollection
-        -- pcall(ReadCollection.read, ReadCollection)
-        
-        -- if not ReadCollection.coll then
-            -- ReadCollection.coll = {}
-            -- ReadCollection.coll_settings = {}
-        -- end
-        
-        -- local default_collection_name = ReadCollection.default_collection_name
-        -- local collection_changes = false
-        
-        -- -- Create a set of collections that exist in Calibre for easy lookup
-        -- local calibre_collections = {}
-        -- for collection_name, file_list in pairs(arg.collections) do
-            -- if collection_name and collection_name ~= "" then
-                -- local clean_name = collection_name:match("^(.-)%s*%(.*%)$") or collection_name
-                -- calibre_collections[clean_name] = {}
-                -- for _, lpath in ipairs(file_list) do
-                    -- local file_path = inbox_dir .. "/" .. lpath
-                    -- calibre_collections[clean_name][file_path] = true
-                -- end
-            -- end
-        -- end
-        
-        -- -- Step 1: Process existing KOReader collections (except Favorites)
-        -- for collection_name, collection_data in pairs(ReadCollection.coll) do
-            -- if collection_name ~= default_collection_name then -- Skip Favorites collection
-                -- local calibre_files = calibre_collections[collection_name]
-                
-                -- if calibre_files then
-                    -- -- Collection exists in both - sync the differences
-                    -- logger.info("Syncing existing collection:", collection_name)
-                    
-                    -- -- Remove files that are no longer in Calibre collection
-                    -- local files_to_remove = {}
-                    -- for file_path in pairs(collection_data) do
-                        -- if not calibre_files[file_path] then
-                            -- table.insert(files_to_remove, file_path)
-                        -- end
-                    -- end
-                    
-                    -- for _, file_path in ipairs(files_to_remove) do
-                        -- logger.dbg("Removing from collection", collection_name, "file:", file_path)
-                        -- ReadCollection:removeItem(file_path, collection_name, true)
-                        -- collection_changes = true
-                    -- end
-                    
-                    -- -- Add files that are new in Calibre collection
-                    -- for file_path in pairs(calibre_files) do
-                        -- if lfs.attributes(file_path, "mode") == "file" and not collection_data[file_path] then
-                            -- logger.dbg("Adding to existing collection", collection_name, "file:", file_path)
-                            -- ReadCollection:addItem(file_path, collection_name)
-                            -- collection_changes = true
-                        -- end
-                    -- end
-                    
-                    -- -- Mark this collection as processed
-                    -- calibre_collections[collection_name] = nil
-                -- else
-                    -- -- Collection no longer exists in Calibre - remove it
-                    -- logger.info("Removing collection no longer in Calibre:", collection_name)
-                    -- ReadCollection.coll[collection_name] = nil
-                    -- ReadCollection.coll_settings[collection_name] = nil
-                    -- collection_changes = true
-                -- end
-            -- end
-        -- end
-        
-        -- -- Step 2: Create new collections that exist only in Calibre
-        -- for collection_name, file_paths in pairs(calibre_collections) do
-            -- if collection_name and collection_name ~= "" then
-                -- logger.info("Creating new collection from Calibre:", collection_name)
-                -- ReadCollection:addCollection(collection_name)
-                
-                -- -- Add files to the new collection
-                -- for file_path in pairs(file_paths) do
-                    -- if lfs.attributes(file_path, "mode") == "file" then
-                        -- ReadCollection:addItem(file_path, collection_name)
-                        -- logger.dbg("Added to new collection", collection_name, "file:", file_path)
-                    -- end
-                -- end
-                
-                -- collection_changes = true
-            -- end
-        -- end
-        
-        -- -- Save changes if any were made
-        -- if collection_changes then
-            -- ReadCollection:write()
-            -- logger.info("Collections synchronized with Calibre booklists")
-        -- end
-        
-        -- -- Sync PocketBook database if running on PocketBook device
-        -- if Device:isPocketBook() then
-            -- PocketBookDBHandler:syncCollections(arg.collections, inbox_dir)
-        -- end
-    -- end
--- end
 
 function CalibreWireless:sendBooklists(arg)
     logger.dbg("SEND_BOOKLISTS", arg)
