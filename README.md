@@ -18,3 +18,5 @@ The program can transmit the status and date of reading to Calibre when connecte
 
 *The code was mostly written by Claude AI. A huge thanks to [Volodymyr Streltsov](https://github.com/VolodymyrStreltsov), who explained to me and Claude what bind and bind1 are.*
 
+## connect-to-calibre.app
+You can also try a [standalone app](https://github.com/reuerendo/connect-to-calibre.app) with similar functionality. It runs significantly faster thanks to metadata caching.
